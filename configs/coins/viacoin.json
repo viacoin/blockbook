@@ -22,10 +22,10 @@
     "package_name": "backend-viacoin",
     "package_revision": "satoshilabs-1",
     "system_user": "viacoin",
-    "version": "1.14-beta-1",
-    "binary_url": "https://github.com/viacoin/viacoin/releases/download/v0.15.2/viacoin-0.15.2-x86_64-linux-gnu.tar.gz",
+    "version": "0.16.3",
+    "binary_url": "https://github.com/viacoin/viacoin/releases/download/v0.16.3/viacoin-0.16.3-x86_64-linux-gnu.tar.gz",
     "verification_type": "sha256",
-    "verification_source": "bdbd432645a8b4baadddb7169ea4bef3d03f80dc2ce53dce5783d8582ac63bab",
+    "verification_source": "4b84d8f1485d799fdff6cb4b1a316c00056b8869b53a702cd8ce2cc581bae59a",
     "extract_command": "tar -C backend --strip 1 -xf",
     "exclude_files": [
       "bin/viacoin-qt"
@@ -40,6 +40,7 @@
     "server_config_file": "bitcoin_like.conf",
     "client_config_file": "bitcoin_like_client.conf",
     "additional_params": {
+      "deprecatedrpc": "estimatefee",
       "discover": 0,
       "rpcthreads": 16,
       "upnp": 0,
