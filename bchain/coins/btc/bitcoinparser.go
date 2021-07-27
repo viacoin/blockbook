@@ -1,12 +1,12 @@
 package btc
 
 import (
-	"blockbook/bchain"
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"math/big"
 	"strconv"
+	"unicode/utf8"
 
 	vlq "github.com/bsm/go-vlq"
 	"github.com/juju/errors"
@@ -16,7 +16,24 @@ import (
 	"github.com/martinboehm/btcutil/chaincfg"
 	"github.com/martinboehm/btcutil/hdkeychain"
 	"github.com/martinboehm/btcutil/txscript"
+	"github.com/trezor/blockbook/bchain"
 )
+
+// temp params for signet(wait btcd commit)
+// magic numbers
+const (
+	SignetMagic wire.BitcoinNet = 0x6a70c7f0
+)
+
+// chain parameters
+var (
+	SigNetParams chaincfg.Params
+)
+
+func init() {
+	SigNetParams = chaincfg.TestNet3Params
+	SigNetParams.Net = SignetMagic
+}
 
 // OutputScriptToAddressesFunc converts ScriptPubKey to bitcoin addresses
 type OutputScriptToAddressesFunc func(script []byte) ([]string, bool, error)
@@ -63,6 +80,8 @@ func GetChainParams(chain string) *chaincfg.Params {
 		return &chaincfg.TestNet3Params
 	case "regtest":
 		return &chaincfg.RegressionNetParams
+	case "signet":
+		return &SigNetParams
 	}
 	return &chaincfg.MainNetParams
 }
@@ -121,6 +140,7 @@ func (p *BitcoinParser) TryParseOPReturn(script []byte) string {
 		// trying 2 variants of OP_RETURN data
 		// 1) OP_RETURN OP_PUSHDATA1 <datalen> <data>
 		// 2) OP_RETURN <datalen> <data>
+		// 3) OP_RETURN OP_PUSHDATA2 <datalenlow> <datalenhigh> <data>
 		var data []byte
 		var l int
 		if script[1] == txscript.OP_PUSHDATA1 && len(script) > 2 {
@@ -130,6 +150,9 @@ func (p *BitcoinParser) TryParseOPReturn(script []byte) string {
 				l = int(script[1])
 				data = script[2:]
 			}
+		} else if script[1] == txscript.OP_PUSHDATA2 && len(script) > 3 {
+			l = int(script[2]) + int(script[3])<<8
+			data = script[4:]
 		} else {
 			l = int(script[1])
 			data = script[2:]
@@ -142,14 +165,7 @@ func (p *BitcoinParser) TryParseOPReturn(script []byte) string {
 				return ed
 			}
 
-			isASCII := true
-			for _, c := range data {
-				if c < 32 || c > 127 {
-					isASCII = false
-					break
-				}
-			}
-			if isASCII {
+			if utf8.Valid(data) {
 				ed = "(" + string(data) + ")"
 			} else {
 				ed = hex.EncodeToString(data)

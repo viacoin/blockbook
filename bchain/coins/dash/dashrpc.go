@@ -1,12 +1,12 @@
 package dash
 
 import (
-	"blockbook/bchain"
-	"blockbook/bchain/coins/btc"
 	"encoding/json"
 
 	"github.com/golang/glog"
 	"github.com/juju/errors"
+	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/bchain/coins/btc"
 )
 
 const firstBlockWithSpecialTransactions = 1028160
@@ -27,7 +27,6 @@ func NewDashRPC(config json.RawMessage, pushHandler func(bchain.NotificationType
 		b.(*btc.BitcoinRPC),
 	}
 	s.RPCMarshaler = btc.JSONMarshalerV1{}
-	s.ChainConfig.SupportsEstimateSmartFee = false
 
 	return s, nil
 }
