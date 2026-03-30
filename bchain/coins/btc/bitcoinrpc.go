@@ -5,12 +5,9 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"io"
-	"io/ioutil"
 	"math/big"
 	"net"
 	"net/http"
-	"runtime/debug"
 	"time"
 
 	"github.com/golang/glog"
@@ -23,16 +20,20 @@ import (
 // BitcoinRPC is an interface to JSON-RPC bitcoind service.
 type BitcoinRPC struct {
 	*bchain.BaseChain
-	client       http.Client
-	rpcURL       string
-	user         string
-	password     string
-	Mempool      *bchain.MempoolBitcoinType
-	ParseBlocks  bool
-	pushHandler  func(bchain.NotificationType)
-	mq           *bchain.MQ
-	ChainConfig  *Configuration
-	RPCMarshaler RPCMarshaler
+	client                 http.Client
+	rpcURL                 string
+	user                   string
+	password               string
+	Mempool                *bchain.MempoolBitcoinType
+	ParseBlocks            bool
+	pushHandler            func(bchain.NotificationType)
+	mq                     *bchain.MQ
+	ChainConfig            *Configuration
+	RPCMarshaler           RPCMarshaler
+	mempoolGolombFilterP   uint8
+	mempoolFilterScripts   string
+	mempoolUseZeroedKey    bool
+	alternativeFeeProvider alternativeFeeProviderInterface
 }
 
 // Configuration represents json config file
@@ -43,12 +44,14 @@ type Configuration struct {
 	RPCUser                      string `json:"rpc_user"`
 	RPCPass                      string `json:"rpc_pass"`
 	RPCTimeout                   int    `json:"rpc_timeout"`
+	AddressAliases               bool   `json:"address_aliases,omitempty"`
 	Parse                        bool   `json:"parse"`
 	MessageQueueBinding          string `json:"message_queue_binding"`
 	Subversion                   string `json:"subversion"`
 	BlockAddressesToKeep         int    `json:"block_addresses_to_keep"`
 	MempoolWorkers               int    `json:"mempool_workers"`
 	MempoolSubWorkers            int    `json:"mempool_sub_workers"`
+	MempoolResyncBatchSize       int    `json:"mempool_resync_batch_size,omitempty"`
 	AddressFormat                string `json:"address_format"`
 	SupportsEstimateFee          bool   `json:"supports_estimate_fee"`
 	SupportsEstimateSmartFee     bool   `json:"supports_estimate_smart_fee"`
@@ -59,6 +62,9 @@ type Configuration struct {
 	AlternativeEstimateFee       string `json:"alternative_estimate_fee,omitempty"`
 	AlternativeEstimateFeeParams string `json:"alternative_estimate_fee_params,omitempty"`
 	MinimumCoinbaseConfirmations int    `json:"minimumCoinbaseConfirmations,omitempty"`
+	MempoolGolombFilterP         uint8  `json:"mempool_golomb_filter_p,omitempty"`
+	MempoolFilterScripts         string `json:"mempool_filter_scripts,omitempty"`
+	MempoolFilterUseZeroedKey    bool   `json:"mempool_filter_use_zeroed_key,omitempty"`
 }
 
 // NewBitcoinRPC returns new BitcoinRPC instance.
@@ -84,6 +90,10 @@ func NewBitcoinRPC(config json.RawMessage, pushHandler func(bchain.NotificationT
 	if c.MempoolSubWorkers < 1 {
 		c.MempoolSubWorkers = 1
 	}
+	// default to legacy per-tx resync behavior unless a batch size is specified
+	if c.MempoolResyncBatchSize < 1 {
+		c.MempoolResyncBatchSize = 1
+	}
 	// btc supports both calls, other coins overriding BitcoinRPC can change this
 	c.SupportsEstimateFee = true
 	c.SupportsEstimateSmartFee = true
@@ -95,15 +105,18 @@ func NewBitcoinRPC(config json.RawMessage, pushHandler func(bchain.NotificationT
 	}
 
 	s := &BitcoinRPC{
-		BaseChain:    &bchain.BaseChain{},
-		client:       http.Client{Timeout: time.Duration(c.RPCTimeout) * time.Second, Transport: transport},
-		rpcURL:       c.RPCURL,
-		user:         c.RPCUser,
-		password:     c.RPCPass,
-		ParseBlocks:  c.Parse,
-		ChainConfig:  &c,
-		pushHandler:  pushHandler,
-		RPCMarshaler: JSONMarshalerV2{},
+		BaseChain:            &bchain.BaseChain{},
+		client:               http.Client{Timeout: time.Duration(c.RPCTimeout) * time.Second, Transport: transport},
+		rpcURL:               c.RPCURL,
+		user:                 c.RPCUser,
+		password:             c.RPCPass,
+		ParseBlocks:          c.Parse,
+		ChainConfig:          &c,
+		pushHandler:          pushHandler,
+		RPCMarshaler:         JSONMarshalerV2{},
+		mempoolGolombFilterP: c.MempoolGolombFilterP,
+		mempoolFilterScripts: c.MempoolFilterScripts,
+		mempoolUseZeroedKey:  c.MempoolFilterUseZeroedKey,
 	}
 
 	return s, nil
@@ -136,11 +149,30 @@ func (b *BitcoinRPC) Initialize() error {
 	glog.Info("rpc: block chain ", params.Name)
 
 	if b.ChainConfig.AlternativeEstimateFee == "whatthefee" {
-		if err = InitWhatTheFee(b, b.ChainConfig.AlternativeEstimateFeeParams); err != nil {
-			glog.Error("InitWhatTheFee error ", err, " Reverting to default estimateFee functionality")
+		glog.Info("Using WhatTheFee")
+		if b.alternativeFeeProvider, err = NewWhatTheFee(b, b.ChainConfig.AlternativeEstimateFeeParams); err != nil {
+			glog.Error("NewWhatTheFee error ", err, " Reverting to default estimateFee functionality")
 			// disable AlternativeEstimateFee logic
-			b.ChainConfig.AlternativeEstimateFee = ""
+			b.alternativeFeeProvider = nil
 		}
+	} else if b.ChainConfig.AlternativeEstimateFee == "mempoolspace" {
+		glog.Info("Using MempoolSpaceFee")
+		if b.alternativeFeeProvider, err = NewMempoolSpaceFee(b, b.ChainConfig.AlternativeEstimateFeeParams); err != nil {
+			glog.Error("MempoolSpaceFee error ", err, " Reverting to default estimateFee functionality")
+			// disable AlternativeEstimateFee logic
+			b.alternativeFeeProvider = nil
+		}
+	} else if b.ChainConfig.AlternativeEstimateFee == "mempoolspaceblock" {
+		glog.Info("Using MempoolSpaceBlockFee")
+		if b.alternativeFeeProvider, err = NewMempoolSpaceBlockFee(b, b.ChainConfig.AlternativeEstimateFeeParams); err != nil {
+			glog.Error("MempoolSpaceBlockFee error ", err, " Reverting to default estimateFee functionality")
+			// disable AlternativeEstimateFee logic
+			b.alternativeFeeProvider = nil
+		}
+	} else if len(b.ChainConfig.AlternativeEstimateFee) > 0 {
+		glog.Error("AlternativeEstimateFee ", b.ChainConfig.AlternativeEstimateFee, " not supported")
+	} else {
+		glog.Info("Using default estimateFee")
 	}
 
 	return nil
@@ -149,7 +181,7 @@ func (b *BitcoinRPC) Initialize() error {
 // CreateMempool creates mempool if not already created, however does not initialize it
 func (b *BitcoinRPC) CreateMempool(chain bchain.BlockChain) (bchain.Mempool, error) {
 	if b.Mempool == nil {
-		b.Mempool = bchain.NewMempoolBitcoinType(chain, b.ChainConfig.MempoolWorkers, b.ChainConfig.MempoolSubWorkers)
+		b.Mempool = bchain.NewMempoolBitcoinType(chain, b.ChainConfig.MempoolWorkers, b.ChainConfig.MempoolSubWorkers, b.mempoolGolombFilterP, b.mempoolFilterScripts, b.mempoolUseZeroedKey, b.ChainConfig.MempoolResyncBatchSize)
 	}
 	return b.Mempool, nil
 }
@@ -163,7 +195,14 @@ func (b *BitcoinRPC) InitializeMempool(addrDescForOutpoint bchain.AddrDescForOut
 	b.Mempool.OnNewTxAddr = onNewTxAddr
 	b.Mempool.OnNewTx = onNewTx
 	if b.mq == nil {
-		mq, err := bchain.NewMQ(b.ChainConfig.MessageQueueBinding, b.pushHandler)
+		bitcoinTopics := bchain.SubscriptionTopics{
+			BlockSubscribe: "hashblock",
+			BlockReceive:   "hashblock",
+			TxSubscribe:    "hashtx",
+			TxReceive:      "hashtx",
+		}
+
+		mq, err := bchain.NewMQ(b.ChainConfig.MessageQueueBinding, b.pushHandler, bitcoinTopics)
 		if err != nil {
 			glog.Error("mq: ", err)
 			return err
@@ -347,6 +386,19 @@ type ResGetRawTransactionNonverbose struct {
 	Result string           `json:"result"`
 }
 
+type rpcBatchRequest struct {
+	JSONRPC string        `json:"jsonrpc,omitempty"`
+	ID      int           `json:"id"`
+	Method  string        `json:"method"`
+	Params  []interface{} `json:"params,omitempty"`
+}
+
+type rpcBatchResponse struct {
+	ID     int              `json:"id"`
+	Result json.RawMessage  `json:"result"`
+	Error  *bchain.RPCError `json:"error"`
+}
+
 // estimatesmartfee
 
 type CmdEstimateSmartFee struct {
@@ -485,7 +537,8 @@ func (b *BitcoinRPC) GetChainInfo() (*bchain.ChainInfo, error) {
 // IsErrBlockNotFound returns true if error means block was not found
 func IsErrBlockNotFound(err *bchain.RPCError) bool {
 	return err.Message == "Block not found" ||
-		err.Message == "Block height out of range"
+		err.Message == "Block height out of range" ||
+		err.Message == "Provided index is greater than the current tip"
 }
 
 // GetBlockHash returns hash of block in best-block-chain at given height.
@@ -721,6 +774,100 @@ func (b *BitcoinRPC) GetTransactionForMempool(txid string) (*bchain.Tx, error) {
 	return tx, nil
 }
 
+// GetRawTransactionsForMempoolBatch returns transactions for multiple txids using a single batch call.
+func (b *BitcoinRPC) GetRawTransactionsForMempoolBatch(txids []string) (map[string]*bchain.Tx, error) {
+	batchSize := b.ChainConfig.MempoolResyncBatchSize
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	results := make(map[string]*bchain.Tx, len(txids))
+	if len(txids) == 0 {
+		return results, nil
+	}
+	if batchSize == 1 {
+		for _, txid := range txids {
+			tx, err := b.GetTransactionForMempool(txid)
+			if err != nil {
+				if err == bchain.ErrTxNotFound {
+					continue
+				}
+				return nil, err
+			}
+			results[txid] = tx
+		}
+		return results, nil
+	}
+	for start := 0; start < len(txids); start += batchSize {
+		end := start + batchSize
+		if end > len(txids) {
+			end = len(txids)
+		}
+		batch := txids[start:end]
+		requests := make([]rpcBatchRequest, 0, len(batch))
+		idToTxid := make(map[int]string, len(batch))
+		for i, txid := range batch {
+			id := i + 1
+			requests = append(requests, rpcBatchRequest{
+				JSONRPC: "1.0",
+				ID:      id,
+				Method:  "getrawtransaction",
+				// Use numeric verbosity (0) for compatibility with older JSON-RPC variants.
+				Params: []interface{}{txid, 0},
+			})
+			idToTxid[id] = txid
+		}
+		var responses []rpcBatchResponse
+		if err := b.callBatch(requests, &responses); err != nil {
+			return nil, err
+		}
+		batchResults, err := decodeBatchRawTransactions(responses, idToTxid, b.Parser)
+		if err != nil {
+			return nil, err
+		}
+		for txid, tx := range batchResults {
+			results[txid] = tx
+		}
+	}
+	return results, nil
+}
+
+func decodeBatchRawTransactions(responses []rpcBatchResponse, idToTxid map[int]string, parser bchain.BlockChainParser) (map[string]*bchain.Tx, error) {
+	results := make(map[string]*bchain.Tx, len(idToTxid))
+	for _, resp := range responses {
+		txid, ok := idToTxid[resp.ID]
+		if !ok {
+			continue
+		}
+		if resp.Error != nil {
+			if IsMissingTx(resp.Error) {
+				continue
+			}
+			// Log and skip so resync can fall back to per-tx fetches for cache misses.
+			glog.Warning("rpc: batch getrawtransaction ", txid, ": ", resp.Error)
+			continue
+		}
+		trimmed := bytes.TrimSpace(resp.Result)
+		// Some backends return "null" without an error for missing transactions.
+		if len(trimmed) == 0 || (len(trimmed) == 4 && string(trimmed) == "null") {
+			continue
+		}
+		var hexTx string
+		if err := json.Unmarshal(trimmed, &hexTx); err != nil {
+			return nil, errors.Annotatef(err, "txid %v", txid)
+		}
+		data, err := hex.DecodeString(hexTx)
+		if err != nil {
+			return nil, errors.Annotatef(err, "txid %v", txid)
+		}
+		tx, err := parser.ParseTx(data)
+		if err != nil {
+			return nil, errors.Annotatef(err, "txid %v", txid)
+		}
+		results[txid] = tx
+	}
+	return results, nil
+}
+
 // GetTransaction returns a transaction by the transaction ID
 func (b *BitcoinRPC) GetTransaction(txid string) (*bchain.Tx, error) {
 	r, err := b.getRawTransaction(txid)
@@ -765,8 +912,7 @@ func (b *BitcoinRPC) getRawTransaction(txid string) (json.RawMessage, error) {
 	return res.Result, nil
 }
 
-// EstimateSmartFee returns fee estimation
-func (b *BitcoinRPC) EstimateSmartFee(blocks int, conservative bool) (big.Int, error) {
+func (b *BitcoinRPC) blockchainEstimateSmartFee(blocks int, conservative bool) (big.Int, error) {
 	// use EstimateFee if EstimateSmartFee is not supported
 	if !b.ChainConfig.SupportsEstimateSmartFee && b.ChainConfig.SupportsEstimateFee {
 		return b.EstimateFee(blocks)
@@ -783,7 +929,6 @@ func (b *BitcoinRPC) EstimateSmartFee(blocks int, conservative bool) (big.Int, e
 		req.Params.EstimateMode = "ECONOMICAL"
 	}
 	err := b.Call(&req, &res)
-
 	var r big.Int
 	if err != nil {
 		return r, err
@@ -798,8 +943,31 @@ func (b *BitcoinRPC) EstimateSmartFee(blocks int, conservative bool) (big.Int, e
 	return r, nil
 }
 
+// EstimateSmartFee returns fee estimation
+func (b *BitcoinRPC) EstimateSmartFee(blocks int, conservative bool) (big.Int, error) {
+	// use alternative estimator if enabled
+	if b.alternativeFeeProvider != nil {
+		r, err := b.alternativeFeeProvider.estimateFee(blocks)
+		// in case of error, fallback to default estimator
+		if err == nil {
+			return r, nil
+		}
+	}
+	return b.blockchainEstimateSmartFee(blocks, conservative)
+}
+
 // EstimateFee returns fee estimation.
 func (b *BitcoinRPC) EstimateFee(blocks int) (big.Int, error) {
+	var r big.Int
+	var err error
+	// use alternative estimator if enabled
+	if b.alternativeFeeProvider != nil {
+		r, err = b.alternativeFeeProvider.estimateFee(blocks)
+		// in case of error, fallback to default estimator
+		if err == nil {
+			return r, nil
+		}
+	}
 	// use EstimateSmartFee if EstimateFee is not supported
 	if !b.ChainConfig.SupportsEstimateFee && b.ChainConfig.SupportsEstimateSmartFee {
 		return b.EstimateSmartFee(blocks, true)
@@ -810,9 +978,8 @@ func (b *BitcoinRPC) EstimateFee(blocks int) (big.Int, error) {
 	res := ResEstimateFee{}
 	req := CmdEstimateFee{Method: "estimatefee"}
 	req.Params.Blocks = blocks
-	err := b.Call(&req, &res)
+	err = b.Call(&req, &res)
 
-	var r big.Int
 	if err != nil {
 		return r, err
 	}
@@ -826,8 +993,23 @@ func (b *BitcoinRPC) EstimateFee(blocks int) (big.Int, error) {
 	return r, nil
 }
 
+// LongTermFeeRate returns smallest fee rate from historic blocks.
+func (b *BitcoinRPC) LongTermFeeRate() (*bchain.LongTermFeeRate, error) {
+	blocks := 1008 // ~7 days of blocks, highest number estimatesmartfee supports
+	glog.V(1).Info("rpc: estimatesmartfee (long term fee rate) - ", blocks)
+	// Going for the ECONOMICAL mode, to get the lowest fee rate
+	feePerUnit, err := b.blockchainEstimateSmartFee(blocks, false)
+	if err != nil {
+		return nil, err
+	}
+	return &bchain.LongTermFeeRate{
+		Blocks:     uint64(blocks),
+		FeePerUnit: feePerUnit,
+	}, nil
+}
+
 // SendRawTransaction sends raw transaction
-func (b *BitcoinRPC) SendRawTransaction(tx string) (string, error) {
+func (b *BitcoinRPC) SendRawTransaction(tx string, disableAlternativeRPC bool) (string, error) {
 	glog.V(1).Info("rpc: sendrawtransaction")
 
 	res := ResSendRawTransaction{}
@@ -871,24 +1053,36 @@ func (b *BitcoinRPC) GetMempoolEntry(txid string) (*bchain.MempoolEntry, error) 
 	return res.Result, nil
 }
 
-func safeDecodeResponse(body io.ReadCloser, res interface{}) (err error) {
-	var data []byte
-	defer func() {
-		if r := recover(); r != nil {
-			glog.Error("unmarshal json recovered from panic: ", r, "; data: ", string(data))
-			debug.PrintStack()
-			if len(data) > 0 && len(data) < 2048 {
-				err = errors.Errorf("Error: %v", string(data))
-			} else {
-				err = errors.New("Internal error")
-			}
-		}
-	}()
-	data, err = ioutil.ReadAll(body)
+// callBatch sends a JSON-RPC batch request and decodes responses.
+func (b *BitcoinRPC) callBatch(req []rpcBatchRequest, res *[]rpcBatchResponse) error {
+	httpData, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &res)
+	httpReq, err := http.NewRequest("POST", b.rpcURL, bytes.NewBuffer(httpData))
+	if err != nil {
+		return err
+	}
+	httpReq.SetBasicAuth(b.user, b.password)
+	httpRes, err := b.client.Do(httpReq)
+	// in some cases the httpRes can contain data even if it returns error
+	// see http://devs.cloudimmunity.com/gotchas-and-common-mistakes-in-go-golang/
+	if httpRes != nil {
+		defer httpRes.Body.Close()
+	}
+	if err != nil {
+		return err
+	}
+	// if server returns HTTP error code it might not return json with response
+	// handle both cases
+	if httpRes.StatusCode != 200 {
+		err = common.SafeDecodeResponseFromReader(httpRes.Body, res)
+		if err != nil {
+			return errors.Errorf("%v %v", httpRes.Status, err)
+		}
+		return nil
+	}
+	return common.SafeDecodeResponseFromReader(httpRes.Body, res)
 }
 
 // Call calls Backend RPC interface, using RPCMarshaler interface to marshall the request
@@ -914,11 +1108,11 @@ func (b *BitcoinRPC) Call(req interface{}, res interface{}) error {
 	// if server returns HTTP error code it might not return json with response
 	// handle both cases
 	if httpRes.StatusCode != 200 {
-		err = safeDecodeResponse(httpRes.Body, &res)
+		err = common.SafeDecodeResponseFromReader(httpRes.Body, &res)
 		if err != nil {
 			return errors.Errorf("%v %v", httpRes.Status, err)
 		}
 		return nil
 	}
-	return safeDecodeResponse(httpRes.Body, &res)
+	return common.SafeDecodeResponseFromReader(httpRes.Body, &res)
 }

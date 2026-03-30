@@ -4,17 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/big"
+	"os"
 	"reflect"
 	"time"
 
 	"github.com/juju/errors"
 	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/bchain/coins/arbitrum"
+	"github.com/trezor/blockbook/bchain/coins/avalanche"
+	"github.com/trezor/blockbook/bchain/coins/base"
 	"github.com/trezor/blockbook/bchain/coins/bch"
 	"github.com/trezor/blockbook/bchain/coins/bellcoin"
 	"github.com/trezor/blockbook/bchain/coins/bitcore"
 	"github.com/trezor/blockbook/bchain/coins/bitzeny"
+	"github.com/trezor/blockbook/bchain/coins/bsc"
 	"github.com/trezor/blockbook/bchain/coins/btc"
 	"github.com/trezor/blockbook/bchain/coins/btg"
 	"github.com/trezor/blockbook/bchain/coins/cpuchain"
@@ -40,13 +44,16 @@ import (
 	"github.com/trezor/blockbook/bchain/coins/namecoin"
 	"github.com/trezor/blockbook/bchain/coins/nuls"
 	"github.com/trezor/blockbook/bchain/coins/omotenashicoin"
+	"github.com/trezor/blockbook/bchain/coins/optimism"
 	"github.com/trezor/blockbook/bchain/coins/pivx"
 	"github.com/trezor/blockbook/bchain/coins/polis"
+	"github.com/trezor/blockbook/bchain/coins/polygon"
 	"github.com/trezor/blockbook/bchain/coins/qtum"
 	"github.com/trezor/blockbook/bchain/coins/ravencoin"
 	"github.com/trezor/blockbook/bchain/coins/ritocoin"
 	"github.com/trezor/blockbook/bchain/coins/snowgem"
 	"github.com/trezor/blockbook/bchain/coins/trezarcoin"
+	"github.com/trezor/blockbook/bchain/coins/tron"
 	"github.com/trezor/blockbook/bchain/coins/unobtanium"
 	"github.com/trezor/blockbook/bchain/coins/vertcoin"
 	"github.com/trezor/blockbook/bchain/coins/viacoin"
@@ -63,14 +70,20 @@ var BlockChainFactories = make(map[string]blockChainFactory)
 func init() {
 	BlockChainFactories["Bitcoin"] = btc.NewBitcoinRPC
 	BlockChainFactories["Testnet"] = btc.NewBitcoinRPC
+	BlockChainFactories["Testnet4"] = btc.NewBitcoinRPC
 	BlockChainFactories["Signet"] = btc.NewBitcoinRPC
 	BlockChainFactories["Regtest"] = btc.NewBitcoinRPC
 	BlockChainFactories["Zcash"] = zec.NewZCashRPC
 	BlockChainFactories["Zcash Testnet"] = zec.NewZCashRPC
 	BlockChainFactories["Ethereum"] = eth.NewEthereumRPC
+	BlockChainFactories["Ethereum Archive"] = eth.NewEthereumRPC
 	BlockChainFactories["Ethereum Classic"] = eth.NewEthereumRPC
-	BlockChainFactories["Ethereum Testnet Ropsten"] = eth.NewEthereumRPC
-	BlockChainFactories["Ethereum Testnet Goerli"] = eth.NewEthereumRPC
+	BlockChainFactories["Ethereum Testnet Sepolia"] = eth.NewEthereumRPC
+	BlockChainFactories["Ethereum Testnet Sepolia Archive"] = eth.NewEthereumRPC
+	BlockChainFactories["Ethereum Testnet Holesky"] = eth.NewEthereumRPC
+	BlockChainFactories["Ethereum Testnet Holesky Archive"] = eth.NewEthereumRPC
+	BlockChainFactories["Ethereum Testnet Hoodi"] = eth.NewEthereumRPC
+	BlockChainFactories["Ethereum Testnet Hoodi Archive"] = eth.NewEthereumRPC
 	BlockChainFactories["Bcash"] = bch.NewBCashRPC
 	BlockChainFactories["Bcash Testnet"] = bch.NewBCashRPC
 	BlockChainFactories["Bgold"] = btg.NewBGoldRPC
@@ -126,29 +139,31 @@ func init() {
 	BlockChainFactories["BitZeny"] = bitzeny.NewBitZenyRPC
 	BlockChainFactories["Trezarcoin"] = trezarcoin.NewTrezarcoinRPC
 	BlockChainFactories["ECash"] = ecash.NewECashRPC
+	BlockChainFactories["Avalanche"] = avalanche.NewAvalancheRPC
+	BlockChainFactories["Avalanche Archive"] = avalanche.NewAvalancheRPC
+	BlockChainFactories["BNB Smart Chain"] = bsc.NewBNBSmartChainRPC
+	BlockChainFactories["BNB Smart Chain Archive"] = bsc.NewBNBSmartChainRPC
+	BlockChainFactories["Polygon"] = polygon.NewPolygonRPC
+	BlockChainFactories["Polygon Archive"] = polygon.NewPolygonRPC
+	BlockChainFactories["Optimism"] = optimism.NewOptimismRPC
+	BlockChainFactories["Optimism Archive"] = optimism.NewOptimismRPC
+	BlockChainFactories["Arbitrum"] = arbitrum.NewArbitrumRPC
+	BlockChainFactories["Arbitrum Archive"] = arbitrum.NewArbitrumRPC
+	BlockChainFactories["Arbitrum Nova"] = arbitrum.NewArbitrumRPC
+	BlockChainFactories["Arbitrum Nova Archive"] = arbitrum.NewArbitrumRPC
+	BlockChainFactories["Base"] = base.NewBaseRPC
+	BlockChainFactories["Base Archive"] = base.NewBaseRPC
+	BlockChainFactories["Tron"] = tron.NewTronRPC
+	BlockChainFactories["Tron Testnet Nile"] = tron.NewTronRPC
 }
 
-// GetCoinNameFromConfig gets coin name and coin shortcut from config file
-func GetCoinNameFromConfig(configfile string) (string, string, string, error) {
-	data, err := ioutil.ReadFile(configfile)
-	if err != nil {
-		return "", "", "", errors.Annotatef(err, "Error reading file %v", configfile)
-	}
-	var cn struct {
-		CoinName     string `json:"coin_name"`
-		CoinShortcut string `json:"coin_shortcut"`
-		CoinLabel    string `json:"coin_label"`
-	}
-	err = json.Unmarshal(data, &cn)
-	if err != nil {
-		return "", "", "", errors.Annotatef(err, "Error parsing file %v", configfile)
-	}
-	return cn.CoinName, cn.CoinShortcut, cn.CoinLabel, nil
+type metricsSetter interface {
+	SetMetrics(*common.Metrics)
 }
 
 // NewBlockChain creates bchain.BlockChain and bchain.Mempool for the coin passed by the parameter coin
 func NewBlockChain(coin string, configfile string, pushHandler func(bchain.NotificationType), metrics *common.Metrics) (bchain.BlockChain, bchain.Mempool, error) {
-	data, err := ioutil.ReadFile(configfile)
+	data, err := os.ReadFile(configfile)
 	if err != nil {
 		return nil, nil, errors.Annotatef(err, "Error reading file %v", configfile)
 	}
@@ -164,6 +179,9 @@ func NewBlockChain(coin string, configfile string, pushHandler func(bchain.Notif
 	bc, err := bcf(config, pushHandler)
 	if err != nil {
 		return nil, nil, err
+	}
+	if withMetrics, ok := bc.(metricsSetter); ok {
+		withMetrics.SetMetrics(metrics)
 	}
 	err = bc.Initialize()
 	if err != nil {
@@ -276,6 +294,11 @@ func (c *blockChainWithMetrics) GetTransactionSpecific(tx *bchain.Tx) (v json.Ra
 	return c.b.GetTransactionSpecific(tx)
 }
 
+func (c *blockChainWithMetrics) GetAddressChainExtraData(addrDesc bchain.AddressDescriptor) (v json.RawMessage, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("GetAddressChainExtraData", s, err) }(time.Now())
+	return c.b.GetAddressChainExtraData(addrDesc)
+}
+
 func (c *blockChainWithMetrics) GetTransactionForMempool(txid string) (v *bchain.Tx, err error) {
 	defer func(s time.Time) { c.observeRPCLatency("GetTransactionForMempool", s, err) }(time.Now())
 	return c.b.GetTransactionForMempool(txid)
@@ -291,9 +314,14 @@ func (c *blockChainWithMetrics) EstimateFee(blocks int) (v big.Int, err error) {
 	return c.b.EstimateFee(blocks)
 }
 
-func (c *blockChainWithMetrics) SendRawTransaction(tx string) (v string, err error) {
+func (c *blockChainWithMetrics) LongTermFeeRate() (v *bchain.LongTermFeeRate, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("LongTermFeeRate", s, err) }(time.Now())
+	return c.b.LongTermFeeRate()
+}
+
+func (c *blockChainWithMetrics) SendRawTransaction(tx string, disableAlternativeRPC bool) (v string, err error) {
 	defer func(s time.Time) { c.observeRPCLatency("SendRawTransaction", s, err) }(time.Now())
-	return c.b.SendRawTransaction(tx)
+	return c.b.SendRawTransaction(tx, disableAlternativeRPC)
 }
 
 func (c *blockChainWithMetrics) GetMempoolEntry(txid string) (v *bchain.MempoolEntry, err error) {
@@ -320,19 +348,82 @@ func (c *blockChainWithMetrics) EthereumTypeEstimateGas(params map[string]interf
 	return c.b.EthereumTypeEstimateGas(params)
 }
 
-func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractInfo(contractDesc bchain.AddressDescriptor) (v *bchain.Erc20Contract, err error) {
-	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetErc20ContractInfo", s, err) }(time.Now())
-	return c.b.EthereumTypeGetErc20ContractInfo(contractDesc)
+func (c *blockChainWithMetrics) EthereumTypeGetEip1559Fees() (v *bchain.Eip1559Fees, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetEip1559Fees", s, err) }(time.Now())
+	return c.b.EthereumTypeGetEip1559Fees()
+}
+
+func (c *blockChainWithMetrics) GetContractInfo(contractDesc bchain.AddressDescriptor) (v *bchain.ContractInfo, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("GetContractInfo", s, err) }(time.Now())
+	return c.b.GetContractInfo(contractDesc)
 }
 
 func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc bchain.AddressDescriptor) (v *big.Int, err error) {
-	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetErc20ContractInfo", s, err) }(time.Now())
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetErc20ContractBalance", s, err) }(time.Now())
 	return c.b.EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc)
+}
+
+func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractBalances(addrDesc bchain.AddressDescriptor, contractDescs []bchain.AddressDescriptor) (v []*big.Int, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetErc20ContractBalances", s, err) }(time.Now())
+	return c.b.EthereumTypeGetErc20ContractBalances(addrDesc, contractDescs)
+}
+
+// GetTokenURI returns URI of non fungible or multi token defined by token id
+func (c *blockChainWithMetrics) GetTokenURI(contractDesc bchain.AddressDescriptor, tokenID *big.Int) (v string, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("GetTokenURI", s, err) }(time.Now())
+	return c.b.GetTokenURI(contractDesc, tokenID)
+}
+
+func (c *blockChainWithMetrics) EthereumTypeGetSupportedStakingPools() []string {
+	return c.b.EthereumTypeGetSupportedStakingPools()
+}
+
+func (c *blockChainWithMetrics) EthereumTypeGetStakingPoolsData(addrDesc bchain.AddressDescriptor) (v []bchain.StakingPoolData, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeStakingPoolsData", s, err) }(time.Now())
+	return c.b.EthereumTypeGetStakingPoolsData(addrDesc)
+}
+
+// EthereumTypeRpcCall calls eth_call with given data and to address
+func (c *blockChainWithMetrics) EthereumTypeRpcCall(data, to, from string) (v string, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeRpcCall", s, err) }(time.Now())
+	return c.b.EthereumTypeRpcCall(data, to, from)
+}
+
+func (c *blockChainWithMetrics) EthereumTypeRpcCallBatch(calls []bchain.EthereumTypeRPCCall) (v []bchain.EthereumTypeRPCCallResult, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeRpcCallBatch", s, err) }(time.Now())
+	batcher, ok := c.b.(interface {
+		EthereumTypeRpcCallBatch(calls []bchain.EthereumTypeRPCCall) ([]bchain.EthereumTypeRPCCallResult, error)
+	})
+	if !ok {
+		return nil, errors.New("EthereumTypeRpcCallBatch: not supported")
+	}
+	return batcher.EthereumTypeRpcCallBatch(calls)
+}
+
+func (c *blockChainWithMetrics) EthereumTypeGetRawTransaction(txid string) (v string, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetRawTransaction", s, err) }(time.Now())
+	return c.b.EthereumTypeGetRawTransaction(txid)
+}
+
+func (c *blockChainWithMetrics) EthereumTypeGetTransactionReceipt(txid string) (v *bchain.RpcReceipt, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetTransactionReceipt", s, err) }(time.Now())
+	return c.b.EthereumTypeGetTransactionReceipt(txid)
 }
 
 type mempoolWithMetrics struct {
 	mempool bchain.Mempool
 	m       *common.Metrics
+}
+
+func (c *mempoolWithMetrics) chainTypeLabel() string {
+	switch c.mempool.(type) {
+	case *bchain.MempoolBitcoinType:
+		return "utxo"
+	case *bchain.MempoolEthereumType:
+		return "evm"
+	default:
+		return "other"
+	}
 }
 
 func (c *mempoolWithMetrics) observeRPCLatency(method string, start time.Time, err error) {
@@ -344,8 +435,26 @@ func (c *mempoolWithMetrics) observeRPCLatency(method string, start time.Time, e
 }
 
 func (c *mempoolWithMetrics) Resync() (count int, err error) {
-	defer func(s time.Time) { c.observeRPCLatency("ResyncMempool", s, err) }(time.Now())
+	start := time.Now()
+	defer func(s time.Time) { c.observeRPCLatency("ResyncMempool", s, err) }(start)
 	count, err = c.mempool.Resync()
+	duration := time.Since(start)
+	c.m.MempoolResyncDuration.Observe(float64(duration) / 1e6) // in milliseconds
+	status := "success"
+	if err != nil {
+		status = "failure"
+	}
+	throughput := 0.0
+	if err == nil {
+		seconds := duration.Seconds()
+		if seconds > 0 {
+			throughput = float64(count) / seconds
+		}
+	}
+	c.m.MempoolResyncThroughput.With(common.Labels{
+		"chain":  c.chainTypeLabel(),
+		"status": status,
+	}).Observe(throughput)
 	if err == nil {
 		c.m.MempoolSize.Set(float64(count))
 	}
@@ -369,4 +478,26 @@ func (c *mempoolWithMetrics) GetAllEntries() (v bchain.MempoolTxidEntries) {
 
 func (c *mempoolWithMetrics) GetTransactionTime(txid string) uint32 {
 	return c.mempool.GetTransactionTime(txid)
+}
+
+func (c *mempoolWithMetrics) GetTxidFilterEntries(filterScripts string, fromTimestamp uint32) (bchain.MempoolTxidFilterEntries, error) {
+	return c.mempool.GetTxidFilterEntries(filterScripts, fromTimestamp)
+}
+
+func (c *blockChainWithMetrics) ResolveENS(name string) (*bchain.ENSResolution, error) {
+	if ensResolver, ok := c.b.(interface {
+		ResolveENS(string) (*bchain.ENSResolution, error)
+	}); ok {
+		return ensResolver.ResolveENS(name)
+	}
+	return nil, errors.New("ENS resolution not supported by underlying chain")
+}
+
+func (c *blockChainWithMetrics) CheckENSExpiration(name string) (bool, error) {
+	if ensResolver, ok := c.b.(interface {
+		CheckENSExpiration(string) (bool, error)
+	}); ok {
+		return ensResolver.CheckENSExpiration(name)
+	}
+	return false, errors.New("ENS expiration check not supported by underlying chain")
 }

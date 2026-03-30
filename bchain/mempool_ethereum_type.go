@@ -1,6 +1,7 @@
 package bchain
 
 import (
+	"errors"
 	"time"
 
 	"github.com/golang/glog"
@@ -74,11 +75,11 @@ func (m *MempoolEthereumType) createTxEntry(txid string, txTime uint32) (txEntry
 			addrIndexes, input.AddrDesc = appendAddress(addrIndexes, ^int32(i), a, parser)
 		}
 	}
-	t, err := parser.EthereumTypeGetErc20FromTx(tx)
+	t, err := parser.EthereumTypeGetTokenTransfersFromTx(tx)
 	if err != nil {
-		glog.Error("GetErc20FromTx for tx ", txid, ", ", err)
+		glog.Error("GetGetTokenTransfersFromTx for tx ", txid, ", ", err)
 	} else {
-		mtx.Erc20 = t
+		mtx.TokenTransfers = t
 		for i := range t {
 			addrIndexes, _ = appendAddress(addrIndexes, ^int32(i+1), t[i].From, parser)
 			addrIndexes, _ = appendAddress(addrIndexes, int32(i+1), t[i].To, parser)
@@ -102,11 +103,14 @@ func (m *MempoolEthereumType) createTxEntry(txid string, txTime uint32) (txEntry
 // Resync ethereum type removes timed out transactions and returns number of transactions in mempool.
 // Transactions are added/removed by AddTransactionToMempool/RemoveTransactionFromMempool methods
 func (m *MempoolEthereumType) Resync() (int, error) {
+	start := time.Now()
+	processedTxs := 0
 	if m.queryBackendOnResync {
 		txs, err := m.chain.GetMempoolTransactions()
 		if err != nil {
 			return 0, err
 		}
+		processedTxs = len(txs)
 		for _, txid := range txs {
 			m.AddTransactionToMempool(txid)
 		}
@@ -127,12 +131,25 @@ func (m *MempoolEthereumType) Resync() (int, error) {
 		m.nextTimeoutRun = now.Add(mempoolTimeoutRunPeriod)
 	}
 	m.mux.Unlock()
-	glog.Info("Mempool: resync ", entries, " transactions in mempool")
+	duration := time.Since(start)
+	durationRounded := duration.Round(time.Millisecond)
+	if durationRounded == 0 {
+		durationRounded = duration
+	}
+	if processedTxs > 0 {
+		throughput := 0.0
+		if seconds := duration.Seconds(); seconds > 0 {
+			throughput = float64(processedTxs) / seconds
+		}
+		glog.Infof("Mempool: resync complete, mempool size %d txs, processed %d txs, duration %s, throughput %.2f tx/s", entries, processedTxs, durationRounded, throughput)
+	} else {
+		glog.Infof("Mempool: resync complete, mempool size %d txs, duration %s", entries, durationRounded)
+	}
 	return entries, nil
 }
 
-// AddTransactionToMempool adds transactions to mempool
-func (m *MempoolEthereumType) AddTransactionToMempool(txid string) {
+// AddTransactionToMempool adds transactions to mempool, returns true if tx added to mempool, false if not added (for example duplicate call)
+func (m *MempoolEthereumType) AddTransactionToMempool(txid string) bool {
 	m.mux.Lock()
 	_, exists := m.txEntries[txid]
 	m.mux.Unlock()
@@ -142,7 +159,7 @@ func (m *MempoolEthereumType) AddTransactionToMempool(txid string) {
 	if !exists {
 		entry, ok := m.createTxEntry(txid, uint32(time.Now().Unix()))
 		if !ok {
-			return
+			return false
 		}
 		m.mux.Lock()
 		m.txEntries[txid] = entry
@@ -151,6 +168,7 @@ func (m *MempoolEthereumType) AddTransactionToMempool(txid string) {
 		}
 		m.mux.Unlock()
 	}
+	return !exists
 }
 
 // RemoveTransactionFromMempool removes transaction from mempool
@@ -164,4 +182,9 @@ func (m *MempoolEthereumType) RemoveTransactionFromMempool(txid string) {
 		m.removeEntryFromMempool(txid, entry)
 	}
 	m.mux.Unlock()
+}
+
+// GetTxidFilterEntries returns all mempool entries with golomb filter from
+func (m *MempoolEthereumType) GetTxidFilterEntries(filterScripts string, fromTimestamp uint32) (MempoolTxidFilterEntries, error) {
+	return MempoolTxidFilterEntries{}, errors.New("Not supported")
 }

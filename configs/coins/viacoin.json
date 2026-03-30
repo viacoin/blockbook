@@ -13,8 +13,9 @@
   },
   "ipc": {
     "rpc_url_template": "http://127.0.0.1:{{.Ports.BackendRPC}}",
+    "rpc_url_ws_template": "ws://127.0.0.1:{{.Ports.BackendRPC}}",
     "rpc_user": "rpc",
-    "rpc_pass": "rpcp",
+    "rpc_pass": "rpc",
     "rpc_timeout": 25,
     "message_queue_binding_template": "tcp://127.0.0.1:{{.Ports.BackendMessageQueue}}"
   },
@@ -42,6 +43,7 @@
     "additional_params": {
       "deprecatedrpc": "estimatefee",
       "discover": 0,
+      "deprecatedrpc": "estimatefee",
       "rpcthreads": 16,
       "upnp": 0,
       "whitelist": "127.0.0.1"
@@ -63,11 +65,15 @@
       "xpub_magic_segwit_p2sh": 77429938,
       "xpub_magic_segwit_native": 78792518,
       "slip44": 14,
-      "additional_params": {}
+      "additional_params": {
+        "fiat_rates": "coingecko",
+        "fiat_rates_vs_currencies": "AED,ARS,AUD,BDT,BHD,BMD,BRL,CAD,CHF,CLP,CNY,CZK,DKK,EUR,GBP,HKD,HUF,IDR,ILS,INR,JPY,KRW,KWD,LKR,MMK,MXN,MYR,NGN,NOK,NZD,PHP,PKR,PLN,RUB,SAR,SEK,SGD,THB,TRY,TWD,UAH,USD,VEF,VND,ZAR,BTC,ETH",
+        "fiat_rates_params": "{\"coin\": \"viacoin\", \"periodSeconds\": 900}"
+      }
     }
   },
   "meta": {
     "package_maintainer": "Romano",
-    "package_maintainer_email": "romanornr@gmail.com"
+    "package_maintainer_email": "viacoin@protonmail.com"
   }
 }

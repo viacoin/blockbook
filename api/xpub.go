@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/golang/glog"
 	"github.com/juju/errors"
 	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/common"
 	"github.com/trezor/blockbook/db"
 )
 
@@ -266,7 +268,9 @@ func (w *Worker) tokenFromXpubAddress(data *xpubData, ad *xpubAddress, changeInd
 		}
 	}
 	return Token{
-		Type:             XPUBAddressTokenType,
+		// Deprecated: Use Standard instead.
+		Type:             bchain.XPUBAddressStandard,
+		Standard:         bchain.XPUBAddressStandard,
 		Name:             address,
 		Decimals:         w.chainParser.AmountDecimals(),
 		BalanceSat:       (*Amount)(balance),
@@ -387,7 +391,7 @@ func (w *Worker) getXpubData(xd *bchain.XpubDescriptor, page int, txsOnPage int,
 }
 
 // GetXpubAddress computes address value and gets transactions for given address
-func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option AccountDetails, filter *AddressFilter, gap int) (*Address, error) {
+func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option AccountDetails, filter *AddressFilter, gap int, secondaryCoin string) (*Address, error) {
 	start := time.Now()
 	page--
 	if page < 0 {
@@ -437,6 +441,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 		}
 		filtered = true
 	}
+	addresses := w.newAddressesMapForAliases()
 	// process mempool, only if ToHeight is not specified
 	if filter.ToHeight == 0 && !filter.OnlyConfirmed {
 		txmMap = make(map[string]*Tx)
@@ -452,7 +457,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 					// the same tx can have multiple addresses from the same xpub, get it from backend it only once
 					tx, foundTx := txmMap[txid.txid]
 					if !foundTx {
-						tx, err = w.GetTransaction(txid.txid, false, true)
+						tx, err = w.getTransaction(txid.txid, false, true, addresses)
 						// mempool transaction may fail
 						if err != nil || tx == nil {
 							glog.Warning("GetTransaction in mempool: ", err)
@@ -529,7 +534,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 			if option == AccountDetailsTxidHistory {
 				txids = append(txids, xpubTxid.txid)
 			} else {
-				tx, err := w.txFromTxid(xpubTxid.txid, bestheight, option, nil)
+				tx, err := w.txFromTxid(xpubTxid.txid, bestheight, option, nil, addresses)
 				if err != nil {
 					return nil, err
 				}
@@ -539,6 +544,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 	} else {
 		txCount = int(data.txCountEstimate)
 	}
+	addrTxCount := int(data.txCountEstimate)
 	usedTokens := 0
 	var tokens []Token
 	var xpubAddresses map[string]struct{}
@@ -553,7 +559,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 				usedTokens++
 			}
 			if option > AccountDetailsBasic {
-				token := w.tokenFromXpubAddress(data, ad, ci, i, option)
+				token := w.tokenFromXpubAddress(data, ad, int(xd.ChangeIndexes[ci]), i, option)
 				if filter.TokensToReturn == TokensToReturnDerived ||
 					filter.TokensToReturn == TokensToReturnUsed && ad.balance != nil ||
 					filter.TokensToReturn == TokensToReturnNonzeroBalance && ad.balance != nil && !IsZeroBigInt(&ad.balance.BalanceSat) {
@@ -566,6 +572,20 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 	setIsOwnAddresses(txs, xpubAddresses)
 	var totalReceived big.Int
 	totalReceived.Add(&data.balanceSat, &data.sentSat)
+
+	var secondaryValue float64
+	if secondaryCoin != "" {
+		ticker := w.fiatRates.GetCurrentTicker("", "")
+		balance, err := strconv.ParseFloat((*Amount)(&data.balanceSat).DecimalString(w.chainParser.AmountDecimals()), 64)
+		if ticker != nil && err == nil {
+			r, found := ticker.Rates[secondaryCoin]
+			if found {
+				secondaryRate := float64(r)
+				secondaryValue = secondaryRate * balance
+			}
+		}
+	}
+
 	addr := Address{
 		Paging:                pg,
 		AddrStr:               xpub,
@@ -573,13 +593,16 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 		TotalReceivedSat:      (*Amount)(&totalReceived),
 		TotalSentSat:          (*Amount)(&data.sentSat),
 		Txs:                   txCount,
+		AddrTxCount:           addrTxCount,
 		UnconfirmedBalanceSat: (*Amount)(&uBalSat),
 		UnconfirmedTxs:        unconfirmedTxs,
 		Transactions:          txs,
 		Txids:                 txids,
 		UsedTokens:            usedTokens,
 		Tokens:                tokens,
+		SecondaryValue:        secondaryValue,
 		XPubAddresses:         xpubAddresses,
+		AddressAliases:        w.getAddressAliases(addresses),
 	}
 	glog.Info("GetXpubAddress ", xpub[:xpubLogPrefix], ", cache ", inCache, ", ", txCount, " txs, ", time.Since(start))
 	return &addr, nil
@@ -673,7 +696,10 @@ func (w *Worker) GetXpubBalanceHistory(xpub string, fromTimestamp, toTimestamp i
 		}
 	}
 	bha := bhs.SortAndAggregate(groupBy)
-	err = w.setFiatRateToBalanceHistories(bha, currencies)
+	if w.metrics != nil {
+		w.metrics.BalanceHistoryPoints.With(common.Labels{"path": "xpub"}).Observe(float64(len(bha)))
+	}
+	err = w.setFiatRateToBalanceHistories(bha, currencies, "xpub")
 	if err != nil {
 		return nil, err
 	}
