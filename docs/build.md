@@ -88,6 +88,29 @@ command: `make NO_CACHE=true all-bitcoin`.
 
 `PORTABLE`: By default, the RocksDB binaries shipped with Blockbook are optimized for the platform you're compiling on (-march=native or the equivalent). If you want to build a portable binary, use `make PORTABLE=1 all-bitcoin`.
 
+`BB_BUILD_ENV`: Selects which RPC URL override family is active during package/config generation. Defaults to `dev`.
+Accepted values are `dev` and `prod`.
+
+`BB_DEV_RPC_URL_HTTP_<coin alias>` / `BB_PROD_RPC_URL_HTTP_<coin alias>`: Override `ipc.rpc_url_template` while generating
+package definitions so you can target hosted HTTP RPC endpoints without editing coin JSON. The root `Makefile` forwards
+`BB_BUILD_ENV` and any `BB_DEV_RPC_URL_*` / `BB_PROD_RPC_URL_*` variables into the Docker build/test containers.
+Resolution prefers the exact alias and also accepts archive variants such as `<alias>_archive` and, for names like Polygon,
+`<prefix>_archive_<suffix>`.
+
+`BB_DEV_RPC_URL_WS_<coin alias>` / `BB_PROD_RPC_URL_WS_<coin alias>`: Override `ipc.rpc_url_ws_template` for WebSocket
+subscriptions. The selected value should point to the same host as the selected HTTP RPC override and follows the same
+fallback resolution.
+
+Example:
+`BB_BUILD_ENV=prod BB_PROD_RPC_URL_HTTP_ethereum=http://backend_hostname:1234 BB_PROD_RPC_URL_WS_ethereum_archive=ws://backend_hostname:1234 make deb-ethereum_archive`.
+
+`BB_RPC_BIND_HOST_<coin alias>`: Overrides backend RPC bind host during package generation. Defaults to `127.0.0.1`
+to avoid unintended exposure. Example: `BB_RPC_BIND_HOST_ethereum=0.0.0.0 make deb-ethereum`.
+
+`BB_RPC_ALLOW_IP_<coin alias>`: Overrides backend RPC allow list for UTXO configs (e.g. `rpcallowip`). Defaults to
+`127.0.0.1` so binding to `0.0.0.0` does not implicitly open access. Example:
+`BB_RPC_ALLOW_IP_bitcoin=10.0.0.0/24 make deb-bitcoin`.
+
 ### Naming conventions and versioning
 
 All configuration keys described below are in coin definition file in *configs/coins*.
@@ -191,7 +214,7 @@ like macOS or Windows, please adapt the instructions to your target system.
 Setup go environment (use newer version of go as available)
 
 ```
-wget https://golang.org/dl/go1.21.4.linux-amd64.tar.gz && tar xf go1.21.4.linux-amd64.tar.gz
+wget https://golang.org/dl/go1.22.8.linux-amd64.tar.gz && tar xf go1.22.8.linux-amd64.tar.gz
 sudo mv go /opt/go
 sudo ln -s /opt/go/bin/go /usr/bin/go
 # see `go help gopath` for details
@@ -209,8 +232,8 @@ sudo apt-get update && sudo apt-get install -y \
     build-essential git wget pkg-config libzmq3-dev libgflags-dev libsnappy-dev zlib1g-dev libzstd-dev  libbz2-dev liblz4-dev
 git clone https://github.com/facebook/rocksdb.git
 cd rocksdb
-git checkout v7.5.3
-CFLAGS=-fPIC CXXFLAGS=-fPIC make release
+git checkout v9.10.0
+CFLAGS=-fPIC CXXFLAGS="-fPIC -Wno-error=array-bounds" make release
 ```
 
 Setup variables for grocksdb

@@ -1,11 +1,13 @@
 package db
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/golang/glog"
 	"github.com/linxGnu/grocksdb"
 	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/common"
 )
 
 // bulk connect
@@ -29,8 +31,10 @@ type BulkConnect struct {
 	txAddressesMap     map[string]*TxAddresses
 	blockFilters       map[string][]byte
 	balances           map[string]*AddrBalance
-	addressContracts   map[string]*AddrContracts
+	addressContracts   map[string]*unpackedAddrContracts
 	height             uint32
+	bulkStats          bulkConnectStats
+	bulkHotness        bulkHotnessStats
 }
 
 const (
@@ -44,6 +48,22 @@ const (
 	maxBlockFilters           = 1000
 )
 
+type bulkConnectStats struct {
+	blocks            uint64
+	txs               uint64
+	tokenTransfers    uint64
+	internalTransfers uint64
+	vin               uint64
+	vout              uint64
+}
+
+type bulkHotnessStats struct {
+	eligible   uint64
+	hits       uint64
+	promotions uint64
+	evictions  uint64
+}
+
 // InitBulkConnect initializes bulk connect and switches DB to inconsistent state
 func (d *RocksDB) InitBulkConnect() (*BulkConnect, error) {
 	b := &BulkConnect{
@@ -51,7 +71,7 @@ func (d *RocksDB) InitBulkConnect() (*BulkConnect, error) {
 		chainType:        d.chainParser.GetChainType(),
 		txAddressesMap:   make(map[string]*TxAddresses),
 		balances:         make(map[string]*AddrBalance),
-		addressContracts: make(map[string]*AddrContracts),
+		addressContracts: make(map[string]*unpackedAddrContracts),
 		blockFilters:     make(map[string][]byte),
 	}
 	if err := d.SetInconsistentState(true); err != nil {
@@ -183,7 +203,74 @@ func (b *BulkConnect) storeBulkBlockFilters(wb *grocksdb.WriteBatch) error {
 	return nil
 }
 
+func (b *BulkConnect) addEthereumStats(blockTxs []ethBlockTx) {
+	b.bulkStats.blocks++
+	b.bulkStats.txs += uint64(len(blockTxs))
+	for i := range blockTxs {
+		b.bulkStats.tokenTransfers += uint64(len(blockTxs[i].contracts))
+		if blockTxs[i].internalData != nil {
+			b.bulkStats.internalTransfers += uint64(len(blockTxs[i].internalData.transfers))
+		}
+	}
+	if b.d.hotAddrTracker != nil {
+		eligible, hits, promotions, evictions := b.d.hotAddrTracker.Stats()
+		b.bulkHotness.eligible += eligible
+		b.bulkHotness.hits += hits
+		b.bulkHotness.promotions += promotions
+		b.bulkHotness.evictions += evictions
+	}
+}
+
+func (b *BulkConnect) addBitcoinStats(block *bchain.Block) {
+	b.bulkStats.blocks++
+	b.bulkStats.txs += uint64(len(block.Txs))
+	for i := range block.Txs {
+		b.bulkStats.vin += uint64(len(block.Txs[i].Vin))
+		b.bulkStats.vout += uint64(len(block.Txs[i].Vout))
+	}
+}
+
+func (b *BulkConnect) updateSyncMetrics(scope string) {
+	if b.d.metrics == nil {
+		return
+	}
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "blocks"}).Set(float64(b.bulkStats.blocks))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "txs"}).Set(float64(b.bulkStats.txs))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "token_transfers"}).Set(float64(b.bulkStats.tokenTransfers))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "internal_transfers"}).Set(float64(b.bulkStats.internalTransfers))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "vin"}).Set(float64(b.bulkStats.vin))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "vout"}).Set(float64(b.bulkStats.vout))
+	b.d.metrics.SyncHotnessStats.With(common.Labels{"scope": scope, "kind": "eligible_lookups"}).Set(float64(b.bulkHotness.eligible))
+	b.d.metrics.SyncHotnessStats.With(common.Labels{"scope": scope, "kind": "lru_hits"}).Set(float64(b.bulkHotness.hits))
+	b.d.metrics.SyncHotnessStats.With(common.Labels{"scope": scope, "kind": "promotions"}).Set(float64(b.bulkHotness.promotions))
+	b.d.metrics.SyncHotnessStats.With(common.Labels{"scope": scope, "kind": "evictions"}).Set(float64(b.bulkHotness.evictions))
+}
+
+func (b *BulkConnect) statsLogSuffix() string {
+	if b.bulkStats.txs == 0 && b.bulkStats.tokenTransfers == 0 && b.bulkStats.internalTransfers == 0 && b.bulkStats.vin == 0 && b.bulkStats.vout == 0 {
+		return ""
+	}
+	if b.bulkStats.tokenTransfers == 0 && b.bulkStats.internalTransfers == 0 && b.bulkStats.vin == 0 && b.bulkStats.vout == 0 {
+		return fmt.Sprintf(", txs=%d", b.bulkStats.txs)
+	}
+	if b.bulkStats.tokenTransfers == 0 && b.bulkStats.internalTransfers == 0 {
+		return fmt.Sprintf(", txs=%d vin=%d vout=%d", b.bulkStats.txs, b.bulkStats.vin, b.bulkStats.vout)
+	}
+	if b.bulkStats.vin == 0 && b.bulkStats.vout == 0 {
+		return fmt.Sprintf(", txs=%d token_transfers=%d internal_transfers=%d",
+			b.bulkStats.txs, b.bulkStats.tokenTransfers, b.bulkStats.internalTransfers)
+	}
+	return fmt.Sprintf(", txs=%d token_transfers=%d internal_transfers=%d vin=%d vout=%d",
+		b.bulkStats.txs, b.bulkStats.tokenTransfers, b.bulkStats.internalTransfers, b.bulkStats.vin, b.bulkStats.vout)
+}
+
+func (b *BulkConnect) resetStats() {
+	b.bulkStats = bulkConnectStats{}
+	b.bulkHotness = bulkHotnessStats{}
+}
+
 func (b *BulkConnect) connectBlockBitcoinType(block *bchain.Block, storeBlockTxs bool) error {
+	b.addBitcoinStats(block)
 	addresses := make(addressesMap)
 	gf, err := bchain.NewGolombFilter(b.d.is.BlockGolombFilterP, b.d.is.BlockFilterScripts, block.BlockHeader.Hash, b.d.is.BlockFilterUseZeroedKey)
 	if err != nil {
@@ -247,7 +334,13 @@ func (b *BulkConnect) connectBlockBitcoinType(block *bchain.Block, storeBlockTxs
 			return err
 		}
 		if bac > b.bulkAddressesCount {
-			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+			suffix := b.statsLogSuffix()
+			if b.d.hotAddrTracker != nil {
+				suffix += b.d.hotAddrTracker.LogSuffix()
+			}
+			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+			b.updateSyncMetrics("bulk")
+			b.resetStats()
 		}
 	}
 	if storeAddressesChan != nil {
@@ -264,12 +357,12 @@ func (b *BulkConnect) connectBlockBitcoinType(block *bchain.Block, storeBlockTxs
 }
 
 func (b *BulkConnect) storeAddressContracts(wb *grocksdb.WriteBatch, all bool) (int, error) {
-	var ac map[string]*AddrContracts
+	var ac map[string]*unpackedAddrContracts
 	if all {
 		ac = b.addressContracts
-		b.addressContracts = make(map[string]*AddrContracts)
+		b.addressContracts = make(map[string]*unpackedAddrContracts)
 	} else {
-		ac = make(map[string]*AddrContracts)
+		ac = make(map[string]*unpackedAddrContracts)
 		// store some random address contracts
 		for k, a := range b.addressContracts {
 			ac[k] = a
@@ -279,7 +372,7 @@ func (b *BulkConnect) storeAddressContracts(wb *grocksdb.WriteBatch, all bool) (
 			}
 		}
 	}
-	if err := b.d.storeAddressContracts(wb, ac); err != nil {
+	if err := b.d.storeUnpackedAddressContracts(wb, ac); err != nil {
 		return 0, err
 	}
 	return len(ac), nil
@@ -309,6 +402,7 @@ func (b *BulkConnect) connectBlockEthereumType(block *bchain.Block, storeBlockTx
 	if err != nil {
 		return err
 	}
+	b.addEthereumStats(blockTxs)
 	b.ethBlockTxs = append(b.ethBlockTxs, blockTxs...)
 	var storeAddrContracts chan error
 	var sa bool
@@ -355,7 +449,13 @@ func (b *BulkConnect) connectBlockEthereumType(block *bchain.Block, storeBlockTx
 			return err
 		}
 		if bac > b.bulkAddressesCount {
-			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+			suffix := b.statsLogSuffix()
+			if b.d.hotAddrTracker != nil {
+				suffix += b.d.hotAddrTracker.LogSuffix()
+			}
+			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+			b.updateSyncMetrics("bulk")
+			b.resetStats()
 		}
 	} else {
 		// if there are blockSpecificData, store them
@@ -422,7 +522,13 @@ func (b *BulkConnect) Close() error {
 	if err := b.d.WriteBatch(wb); err != nil {
 		return err
 	}
-	glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+	suffix := b.statsLogSuffix()
+	if b.d.hotAddrTracker != nil {
+		suffix += b.d.hotAddrTracker.LogSuffix()
+	}
+	glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+	b.updateSyncMetrics("bulk")
+	b.resetStats()
 	if storeTxAddressesChan != nil {
 		if err := <-storeTxAddressesChan; err != nil {
 			return err
@@ -438,19 +544,24 @@ func (b *BulkConnect) Close() error {
 			return err
 		}
 	}
-	bt, err := b.d.loadBlockTimes()
-	if err != nil {
-		return err
-	}
-	avg := b.d.is.SetBlockTimes(bt)
-	if b.d.metrics != nil {
-		b.d.metrics.AvgBlockPeriod.Set(float64(avg))
-	}
-
 	if err := b.d.SetInconsistentState(false); err != nil {
 		return err
 	}
 	glog.Info("rocksdb: bulk connect closed, db set to open state")
+
+	// set block times asynchronously (if not in unit test), it slows server startup for chains with large number of blocks
+	d := b.d
+	if d.is.Coin == "coin-unittest" {
+		d.setBlockTimes()
+	} else {
+		// Keep async block-time refresh tracked so RocksDB.Close() waits for iterator teardown.
+		d.setBlockTimesWG.Add(1)
+		go func(db *RocksDB) {
+			defer db.setBlockTimesWG.Done()
+			db.setBlockTimes()
+		}(d)
+	}
+
 	b.d = nil
 	return nil
 }

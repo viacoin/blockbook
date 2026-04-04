@@ -219,6 +219,12 @@ type resultAddressTxids struct {
 }
 
 func (s *SocketIoServer) getAddressTxids(addr []string, opts *addrOpts) (res resultAddressTxids, err error) {
+	if opts.Start < 0 {
+		return res, errors.New("Invalid parameter start")
+	}
+	if opts.End < 0 {
+		return res, errors.New("Invalid parameter end")
+	}
 	txids := make([]string, 0, 8)
 	lower, higher := uint32(opts.End), uint32(opts.Start)
 	for _, address := range addr {
@@ -379,6 +385,12 @@ func (s *SocketIoServer) getAddressesFromVout(vout *bchain.Vout) ([]string, erro
 }
 
 func (s *SocketIoServer) getAddressHistory(addr []string, opts *addrOpts) (res resultGetAddressHistory, err error) {
+	if opts.From < 0 {
+		return res, errors.New("Invalid parameter from")
+	}
+	if opts.To < 0 {
+		return res, errors.New("Invalid parameter to")
+	}
 	txr, err := s.getAddressTxids(addr, opts)
 	if err != nil {
 		return
@@ -641,7 +653,7 @@ func (s *SocketIoServer) getDetailedTransaction(txid string) (res resultGetDetai
 }
 
 func (s *SocketIoServer) sendTransaction(tx string) (res resultSendTransaction, err error) {
-	txid, err := s.chain.SendRawTransaction(tx)
+	txid, err := s.chain.SendRawTransaction(tx, false)
 	if err != nil {
 		return res, err
 	}

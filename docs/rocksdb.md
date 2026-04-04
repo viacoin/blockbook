@@ -25,7 +25,7 @@
 
 **Database structure:**
 
-The database structure described here is of Blockbook version **0.4.0** (internal data format version 6).
+The database structure described here is of Blockbook version **0.5.0** (internal data format version 7).
 
 The database structure for **Bitcoin type** and **Ethereum type** coins is different. Column families used for both types:
 
@@ -100,12 +100,26 @@ Column families used only by **Ethereum type** coins:
   and array of _contracts_ with _number of transfers_ of given address.
 
   ```
-  (addrDesc []byte) -> (total_txs vuint)+(non-contract_txs vuint)+(internal_txs vuint)+
+  (addrDesc []byte) -> (total_txs vuint)+(non-contract_txs vuint)+(internal_txs vuint)+(contracts vuint)+
                        []((contractAddrDesc []byte)+(type+4*nr_transfers vuint))+
                        <(value bigInt) if ERC20> or
                          <(nr_values vuint)+[](id bigInt) if ERC721> or
                          <(nr_values vuint)+[]((id bigInt)+(value bigInt)) if ERC1155>
   ```
+
+  - Contract ordering & hotness lookup
+
+  Contract entries are appended in discovery order (they are not sorted). Lookups are normally a linear scan, but for
+  mid-size lists we lazily build an in-memory index map when an address becomes "hot" (frequently looked up within the
+  current block). A size-limited LRU keeps hot addresses; once the cache is full, the least-recently used hot address is
+  evicted and will fall back to linear scans until it becomes hot again.
+
+  - Large addressContracts cache
+
+  To reduce repeated RocksDB reads/writes for very large entries, Blockbook caches addressContracts blobs whose packed
+  size exceeds `address_contracts_cache_min_size`. The cache is flushed periodically, and also flushed early when its
+  total size crosses `address_contracts_cache_max_bytes`. Early flush avoids unbounded memory growth at the cost of
+  more frequent writes.
 
 - **internalData** (used only by Ethereum type coins)
 

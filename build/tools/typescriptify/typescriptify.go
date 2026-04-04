@@ -19,11 +19,13 @@ func main() {
 
 	t.ManageType(api.Amount{}, typescriptify.TypeOptions{TSType: "string"})
 	t.ManageType([]api.Amount{}, typescriptify.TypeOptions{TSType: "string[]"})
+	t.ManageType([]*api.Amount{}, typescriptify.TypeOptions{TSType: "string[]"})
 	t.ManageType(big.Int{}, typescriptify.TypeOptions{TSType: "number"})
 	t.ManageType(time.Time{}, typescriptify.TypeOptions{TSType: "string", TSDoc: "Time in ISO 8601 YYYY-MM-DDTHH:mm:ss.sssZd"})
 
 	// API - REST and Websocket
 	t.Add(api.APIError{})
+	t.Add(bchain.TronChainExtraData{})
 	t.Add(api.Tx{})
 	t.Add(api.FeeStats{})
 	t.Add(api.Address{})
@@ -53,6 +55,7 @@ func main() {
 	t.Add(server.WsTransactionSpecificReq{})
 	t.Add(server.WsEstimateFeeReq{})
 	t.Add(server.WsEstimateFeeRes{})
+	t.Add(server.WsLongTermFeeRateRes{})
 	t.Add(server.WsSendTransactionReq{})
 	t.Add(server.WsSubscribeAddressesReq{})
 	t.Add(server.WsSubscribeFiatRatesReq{})
@@ -60,6 +63,8 @@ func main() {
 	t.Add(server.WsFiatRatesForTimestampsReq{})
 	t.Add(server.WsFiatRatesTickersListReq{})
 	t.Add(server.WsMempoolFiltersReq{})
+	t.Add(server.WsRpcCallReq{})
+	t.Add(server.WsRpcCallRes{})
 	t.Add(bchain.MempoolTxidFilterEntries{})
 
 	err := t.ConvertToFile("blockbook-api.ts")

@@ -16,22 +16,23 @@
         "blockbook_public": 19176
     },
     "ipc": {
-        "rpc_url_template": "ws://127.0.0.1:{{.Ports.BackendRPC}}",
+        "rpc_url_template": "http://127.0.0.1:{{.Ports.BackendRPC}}",
+        "rpc_url_ws_template": "ws://127.0.0.1:{{.Ports.BackendRPC}}",
         "rpc_timeout": 25
     },
     "backend": {
         "package_name": "backend-ethereum-testnet-sepolia-consensus",
         "package_revision": "satoshilabs-1",
         "system_user": "ethereum",
-        "version": "4.1.1",
-        "binary_url": "https://github.com/prysmaticlabs/prysm/releases/download/v4.1.1/beacon-chain-v4.1.1-linux-amd64",
+        "version": "7.1.0",
+        "binary_url": "https://github.com/OffchainLabs/prysm/releases/download/v7.1.0/beacon-chain-v7.1.0-linux-amd64",
         "verification_type": "sha256",
-        "verification_source": "108feeca273432fcb0e968d1fc3dab38a412650c591440733cad73e3140d02b5",
+        "verification_source": "a5402ea516d055f8ce150fff2ab4b73adbd8213789789e74c0e0a33eed3397ce",
         "extract_command": "mv ${ARCHIVE} backend/beacon-chain && chmod +x backend/beacon-chain && echo",
         "exclude_files": [],
         "exec_command_template": "/bin/sh -c '{{.Env.BackendInstallPath}}/{{.Coin.Alias}}/beacon-chain --sepolia --accept-terms-of-use --execution-endpoint=http://localhost:{{.Ports.BackendAuthRpc}} --grpc-gateway-port=17576 --rpc-port=17577 --monitoring-port=17578 --p2p-tcp-port=13576 --p2p-udp-port=12576 --datadir={{.Env.BackendDataPath}}/{{.Coin.Alias}}/backend --jwt-secret={{.Env.BackendDataPath}}/ethereum_testnet_sepolia/backend/erigon/jwt.hex --genesis-state={{.Env.BackendDataPath}}/{{.Coin.Alias}}/backend/genesis.ssz 2>>{{.Env.BackendDataPath}}/{{.Coin.Alias}}/backend/{{.Coin.Alias}}.log'",
         "logrotate_files_template": "{{.Env.BackendDataPath}}/{{.Coin.Alias}}/backend/{{.Coin.Alias}}.log",
-        "postinst_script_template": "wget https://github.com/eth-clients/merge-testnets/raw/302fe27afdc7a9d15b1766a0c0a9d64319140255/sepolia/genesis.ssz -O {{.Env.BackendDataPath}}/{{.Coin.Alias}}/backend/genesis.ssz",
+        "postinst_script_template": "wget https://github.com/eth-clients/holesky/raw/main/metadata/genesis.ssz -O {{.Env.BackendDataPath}}/{{.Coin.Alias}}/backend/genesis.ssz",
         "service_type": "simple",
         "service_additional_params_template": "",
         "protect_memory": true,
@@ -40,8 +41,8 @@
         "client_config_file": "",
         "platforms": {
             "arm64": {
-                "binary_url": "https://github.com/prysmaticlabs/prysm/releases/download/v4.1.1/beacon-chain-v4.1.1-linux-arm64",
-                "verification_source": "68db674c5ab36957b08e335c0d417ce2279ea1dca690ce302f73b156a7dbafbb"
+                "binary_url": "https://github.com/OffchainLabs/prysm/releases/download/v7.1.0/beacon-chain-v7.1.0-linux-arm64",
+                "verification_source": "afc18b5d0810ec6ba716bfc41b7bd574962214688be4ab71afac91d03d46826c"
             }
         }
     },

@@ -2,6 +2,7 @@
     "coin": {
         "name": "BNB Smart Chain",
         "shortcut": "BNB",
+        "network": "BSC",
         "label": "BNB Smart Chain",
         "alias": "bsc"
     },
@@ -13,7 +14,8 @@
         "blockbook_public": 9164
     },
     "ipc": {
-        "rpc_url_template": "ws://127.0.0.1:{{.Ports.BackendRPC}}",
+        "rpc_url_template": "http://127.0.0.1:{{.Ports.BackendRPC}}",
+        "rpc_url_ws_template": "ws://127.0.0.1:{{.Ports.BackendRPC}}",
         "rpc_timeout": 25
     },
     "backend": {

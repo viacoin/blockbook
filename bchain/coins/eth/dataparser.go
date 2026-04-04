@@ -51,10 +51,7 @@ func parseSimpleStringProperty(data string) string {
 	// allow string properties as UTF-8 data
 	b, err := hex.DecodeString(data)
 	if err == nil {
-		i := bytes.Index(b, []byte{0})
-		if i > 32 {
-			i = 32
-		}
+		i := min(bytes.Index(b, []byte{0}), 32)
 		if i > 0 {
 			b = b[:i]
 		}
@@ -242,7 +239,7 @@ func tryParseParams(data string, params []string, parsedParams []abi.Type) []bch
 // ParseInputData tries to parse transaction input data from known FourByteSignatures
 // as there may be multiple signatures for the same four bytes, it tries to match the input to the known parameters
 // it does not parse tuples for now
-func ParseInputData(signatures *[]bchain.FourByteSignature, data string) *bchain.EthereumParsedInputData {
+func (p *EthereumParser) ParseInputData(signatures *[]bchain.FourByteSignature, data string) *bchain.EthereumParsedInputData {
 	if len(data) <= 2 { // data is empty or 0x
 		return &bchain.EthereumParsedInputData{Name: "Transfer"}
 	}

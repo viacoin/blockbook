@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"html/template"
 	"math/big"
 	"net/http"
@@ -15,6 +16,25 @@ import (
 	"github.com/trezor/blockbook/api"
 	"github.com/trezor/blockbook/common"
 )
+
+// getContentSecurityPolicy returns a Content Security Policy header value
+// to help prevent XSS attacks by controlling which resources can be loaded.
+//
+// Note: Uses 'unsafe-inline' for scripts and styles due to inline QRCode initialization
+// and Bootstrap requirements. Consider migrating to nonces for better security.
+func getContentSecurityPolicy() string {
+	return "default-src 'self'; " +
+		"script-src 'self' 'unsafe-inline'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data: https: ipfs: https://ipfs.io; " +
+		"connect-src 'self' https: ipfs: https://ipfs.io; " +
+		"font-src 'self' data:; " +
+		"object-src 'none'; " +
+		"frame-ancestors 'none'; " +
+		"base-uri 'self'; " +
+		"form-action 'self'; " +
+		"upgrade-insecure-requests;"
+}
 
 type tpl int
 
@@ -33,6 +53,67 @@ type htmlTemplates[TD any] struct {
 	newTemplateDataWithError func(error *api.APIError, r *http.Request) *TD
 	parseTemplates           func() []*template.Template
 	postHtmlTemplateHandler  func(data *TD, w http.ResponseWriter, r *http.Request)
+}
+
+func (s *htmlTemplates[TD]) jsonHandler(handler func(r *http.Request, apiVersion int) (interface{}, error), apiVersion int) func(w http.ResponseWriter, r *http.Request) {
+	type jsonError struct {
+		Text       string `json:"error"`
+		HTTPStatus int    `json:"-"`
+	}
+	handlerName := getFunctionName(handler)
+	return func(w http.ResponseWriter, r *http.Request) {
+		var data interface{}
+		var err error
+		defer func() {
+			if e := recover(); e != nil {
+				glog.Error(handlerName, " recovered from panic: ", e)
+				debug.PrintStack()
+				if s.debug {
+					data = jsonError{fmt.Sprint("Internal server error: recovered from panic ", e), http.StatusInternalServerError}
+				} else {
+					data = jsonError{"Internal server error", http.StatusInternalServerError}
+				}
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Content-Security-Policy", getContentSecurityPolicy())
+			if e, isError := data.(jsonError); isError {
+				w.WriteHeader(e.HTTPStatus)
+			}
+			err = json.NewEncoder(w).Encode(data)
+			if err != nil {
+				glog.Warning("json encode ", err)
+			}
+			if s.metrics != nil {
+				s.metrics.ExplorerPendingRequests.With((common.Labels{"method": handlerName})).Dec()
+			}
+		}()
+		if s.metrics != nil {
+			s.metrics.ExplorerPendingRequests.With((common.Labels{"method": handlerName})).Inc()
+		}
+		data, err = handler(r, apiVersion)
+		if err != nil || data == nil {
+			if apiErr, ok := err.(*api.APIError); ok {
+				if apiErr.Public {
+					data = jsonError{apiErr.Error(), http.StatusBadRequest}
+				} else {
+					data = jsonError{apiErr.Error(), http.StatusInternalServerError}
+				}
+			} else {
+				if err != nil {
+					glog.Error(handlerName, " error: ", err)
+				}
+				if s.debug {
+					if data != nil {
+						data = jsonError{fmt.Sprintf("Internal server error: %v, data %+v", err, data), http.StatusInternalServerError}
+					} else {
+						data = jsonError{fmt.Sprintf("Internal server error: %v", err), http.StatusInternalServerError}
+					}
+				} else {
+					data = jsonError{"Internal server error", http.StatusInternalServerError}
+				}
+			}
+		}
+	}
 }
 
 func (s *htmlTemplates[TD]) htmlTemplateHandler(handler func(w http.ResponseWriter, r *http.Request) (tpl, *TD, error)) func(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +136,7 @@ func (s *htmlTemplates[TD]) htmlTemplateHandler(handler func(w http.ResponseWrit
 			// noTpl means the handler completely handled the request
 			if t != noTpl {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Content-Security-Policy", getContentSecurityPolicy())
 				// return 500 Internal Server Error with errorInternalTpl
 				if t == errorInternalTpl {
 					w.WriteHeader(http.StatusInternalServerError)
@@ -214,7 +296,7 @@ func appendAmountSpan(rv *strings.Builder, class, amount, shortcut, txDate strin
 	}
 	if shortcut != "" {
 		rv.WriteString(" ")
-		rv.WriteString(shortcut)
+		rv.WriteString(html.EscapeString(shortcut))
 	}
 	rv.WriteString("</span>")
 }
@@ -257,7 +339,7 @@ func appendAmountSpanBitcoinType(rv *strings.Builder, class, amount, shortcut, t
 	rv.WriteString("</span>")
 	if shortcut != "" {
 		rv.WriteString(" ")
-		rv.WriteString(shortcut)
+		rv.WriteString(html.EscapeString(shortcut))
 	}
 	rv.WriteString("</span>")
 }
@@ -271,7 +353,7 @@ func appendAmountWrapperSpan(rv *strings.Builder, primary, symbol, classes strin
 	rv.WriteString(`" cc="`)
 	rv.WriteString(primary)
 	rv.WriteString(" ")
-	rv.WriteString(symbol)
+	rv.WriteString(html.EscapeString(symbol))
 	rv.WriteString(`">`)
 }
 

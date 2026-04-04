@@ -21,8 +21,8 @@
                     <td><a href="/address/{{$data.ContractInfo.Contract}}"><span class="copyable">{{$data.ContractInfo.Contract}}</span></a><br>{{$data.ContractInfo.Name}}</td>
                 </tr>
                 <tr>
-                    <td>Contract type</td>
-                    <td>{{$data.ContractInfo.Type}}</td>
+                    <td>Standard</td>
+                    <td>{{$data.ContractInfo.Standard}}</td>
                 </tr>
             </tbody>
         </table>
@@ -51,7 +51,7 @@
     }
     async function getMetadata(url) {
         try {
-            const uri={{ jsStr $data.URI }};
+            const uri={{ $data.URI }};
             if(uri) {
                 const response = await fetch(uri);
                 const contentType=response.headers.get('content-type');

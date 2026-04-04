@@ -11,6 +11,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/juju/errors"
 	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/common"
 	"github.com/trezor/blockbook/db"
 )
 
@@ -267,7 +268,9 @@ func (w *Worker) tokenFromXpubAddress(data *xpubData, ad *xpubAddress, changeInd
 		}
 	}
 	return Token{
-		Type:             bchain.XPUBAddressTokenType,
+		// Deprecated: Use Standard instead.
+		Type:             bchain.XPUBAddressStandard,
+		Standard:         bchain.XPUBAddressStandard,
 		Name:             address,
 		Decimals:         w.chainParser.AmountDecimals(),
 		BalanceSat:       (*Amount)(balance),
@@ -556,7 +559,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 				usedTokens++
 			}
 			if option > AccountDetailsBasic {
-				token := w.tokenFromXpubAddress(data, ad, ci, i, option)
+				token := w.tokenFromXpubAddress(data, ad, int(xd.ChangeIndexes[ci]), i, option)
 				if filter.TokensToReturn == TokensToReturnDerived ||
 					filter.TokensToReturn == TokensToReturnUsed && ad.balance != nil ||
 					filter.TokensToReturn == TokensToReturnNonzeroBalance && ad.balance != nil && !IsZeroBigInt(&ad.balance.BalanceSat) {
@@ -693,7 +696,10 @@ func (w *Worker) GetXpubBalanceHistory(xpub string, fromTimestamp, toTimestamp i
 		}
 	}
 	bha := bhs.SortAndAggregate(groupBy)
-	err = w.setFiatRateToBalanceHistories(bha, currencies)
+	if w.metrics != nil {
+		w.metrics.BalanceHistoryPoints.With(common.Labels{"path": "xpub"}).Observe(float64(len(bha)))
+	}
+	err = w.setFiatRateToBalanceHistories(bha, currencies, "xpub")
 	if err != nil {
 		return nil, err
 	}
