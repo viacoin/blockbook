@@ -28,8 +28,8 @@ import (
 	"github.com/trezor/blockbook/server"
 )
 
-// debounce too close requests for resync
-const debounceResyncIndexMs = 1009
+// default debounce for too-close requests for resync
+const defaultResyncIndexDebounceMs = 1009
 
 // debounce too close requests for resync mempool (ZeroMQ sends message for each tx, when new block there are many transactions)
 const debounceResyncMempoolMs = 1009
@@ -82,6 +82,9 @@ var (
 	// resync index at least each resyncIndexPeriodMs (could be more often if invoked by message from ZeroMQ)
 	resyncIndexPeriodMs = flag.Int("resyncindexperiod", 935093, "resync index period in milliseconds")
 
+	// debounce for push-triggered index resync requests
+	resyncIndexDebounceMs = flag.Int("resyncindexdebounce", defaultResyncIndexDebounceMs, "debounce for push-triggered index resync requests in milliseconds")
+
 	// resync mempool at least each resyncMempoolPeriodMs (could be more often if invoked by message from ZeroMQ)
 	resyncMempoolPeriodMs = flag.Int("resyncmempoolperiod", 60017, "resync mempool period in milliseconds")
 
@@ -89,8 +92,12 @@ var (
 )
 
 var (
-	chanSyncIndex                 = make(chan struct{})
-	chanSyncMempool               = make(chan struct{})
+	// Buffer 1 + non-blocking sends in pushSynchronizationHandler decouple the
+	// WebSocket/ZMQ source goroutines from sync progress. If sync is stuck inside
+	// TickAndDebounce's f(), additional notifications are dropped here rather
+	// than blocking the source; TickAndDebounce's tick-period backstop still fires.
+	chanSyncIndex                 = make(chan struct{}, 1)
+	chanSyncMempool               = make(chan struct{}, 1)
 	chanStoreInternalState        = make(chan struct{})
 	chanSyncIndexDone             = make(chan struct{})
 	chanSyncMempoolDone           = make(chan struct{})
@@ -104,7 +111,6 @@ var (
 	internalState                 *common.InternalState
 	fiatRates                     *fiat.FiatRates
 	callbacksOnNewBlock           []bchain.OnNewBlockFunc
-	callbacksOnNewTxAddr          []bchain.OnNewTxAddrFunc
 	callbacksOnNewTx              []bchain.OnNewTxFunc
 	callbacksOnNewFiatRatesTicker []fiat.OnNewFiatRatesTicker
 	chanOsSignal                  chan os.Signal
@@ -187,6 +193,17 @@ func mainWithExitCode() int {
 		return exitCodeFatal
 	}
 
+	// Chains that expose a configured average block time (currently EVM coins via
+	// EthereumRPC.AverageBlockTimeDuration) publish it as a static gauge so
+	// alerts can normalize the tip-age metric across coins with different cadences.
+	if provider, ok := chain.(interface {
+		AverageBlockTimeDuration() (time.Duration, error)
+	}); ok {
+		if d, err := provider.AverageBlockTimeDuration(); err == nil && d > 0 {
+			metrics.AverageBlockTimeSeconds.Set(d.Seconds())
+		}
+	}
+
 	index, err = db.NewRocksDB(*dbPath, *dbCache, *dbMaxOpenFiles, chain.GetChainParser(), metrics, *extendedIndex)
 	if err != nil {
 		glog.Error("rocksDB: ", err)
@@ -265,7 +282,24 @@ func mainWithExitCode() int {
 		return exitCodeOK
 	}
 
-	syncWorker, err = db.NewSyncWorker(index, chain, *syncWorkers, *syncChunk, *blockFrom, *dryRun, chanOsSignal, metrics, internalState)
+	// Per-chain missing-block retry override, if any. Coin RPCs that opt in
+	// expose MissingBlockRetryOverride(); chains without the method keep defaults.
+	var syncCfg *db.SyncWorkerConfig
+	if provider, ok := chain.(interface {
+		MissingBlockRetryOverride() *bchain.MissingBlockRetry
+	}); ok {
+		if override := provider.MissingBlockRetryOverride(); override != nil {
+			syncCfg = &db.SyncWorkerConfig{
+				MissingBlockRetry: db.ApplyMissingBlockRetryOverride(override),
+			}
+			glog.Infof("sync: missingBlockRetry override applied: retryDelay=%s recheckThreshold=%d tipRecheckThreshold=%d maxStall=%s",
+				syncCfg.MissingBlockRetry.RetryDelay,
+				syncCfg.MissingBlockRetry.RecheckThreshold,
+				syncCfg.MissingBlockRetry.TipRecheckThreshold,
+				syncCfg.MissingBlockRetry.MaxStallDuration)
+		}
+	}
+	syncWorker, err = db.NewSyncWorkerWithConfig(index, chain, *syncWorkers, *syncChunk, *blockFrom, *dryRun, chanOsSignal, metrics, internalState, syncCfg)
 	if err != nil {
 		glog.Errorf("NewSyncWorker %v", err)
 		return exitCodeFatal
@@ -335,7 +369,7 @@ func mainWithExitCode() int {
 		if chain.GetChainParser().GetChainType() == bchain.ChainBitcoinType {
 			addrDescForOutpoint = index.AddrDescForOutpoint
 		}
-		err = chain.InitializeMempool(addrDescForOutpoint, onNewTxAddr, onNewTx)
+		err = chain.InitializeMempool(addrDescForOutpoint, onNewTx)
 		if err != nil {
 			glog.Error("initializeMempool ", err)
 			return exitCodeFatal
@@ -355,7 +389,6 @@ func mainWithExitCode() int {
 	if publicServer != nil {
 		// start full public interface
 		callbacksOnNewBlock = append(callbacksOnNewBlock, publicServer.OnNewBlock)
-		callbacksOnNewTxAddr = append(callbacksOnNewTxAddr, publicServer.OnNewTxAddr)
 		callbacksOnNewTx = append(callbacksOnNewTx, publicServer.OnNewTx)
 		callbacksOnNewFiatRatesTicker = append(callbacksOnNewFiatRatesTicker, publicServer.OnNewFiatRatesTicker)
 		publicServer.ConnectFullPublicInterface()
@@ -511,7 +544,13 @@ func blockbookAppInfoMetric(db *db.RocksDB, chain bchain.BlockChain, txCache *db
 		"backend_subversion":       subversion,
 		"backend_protocol_version": si.Backend.ProtocolVersion}).Set(float64(0))
 	metrics.BackendBestHeight.Set(float64(si.Backend.Blocks))
+	metrics.BackendTipAgeSeconds.Set(time.Since(is.GetBackendTipLastAdvance()).Seconds())
 	metrics.BlockbookBestHeight.Set(float64(si.Blockbook.BestHeight))
+	synchronized := 0.0
+	if si.Blockbook.InSync {
+		synchronized = 1
+	}
+	metrics.Synchronized.Set(synchronized)
 	return nil
 }
 
@@ -544,7 +583,7 @@ func syncIndexLoop() {
 	defer close(chanSyncIndexDone)
 	glog.Info("syncIndexLoop starting")
 	// resync index about every 15 minutes if there are no chanSyncIndex requests, with debounce 1 second
-	common.TickAndDebounce(time.Duration(*resyncIndexPeriodMs)*time.Millisecond, debounceResyncIndexMs*time.Millisecond, chanSyncIndex, func() {
+	common.TickAndDebounce(time.Duration(*resyncIndexPeriodMs)*time.Millisecond, time.Duration(*resyncIndexDebounceMs)*time.Millisecond, chanSyncIndex, func() {
 		if err := syncWorker.ResyncIndex(onNewBlock, false); err != nil {
 			if err == db.ErrOperationInterrupted || common.IsInShutdown() {
 				return
@@ -647,17 +686,6 @@ func storeInternalStateLoop() {
 	glog.Info("storeInternalStateLoop stopped")
 }
 
-func onNewTxAddr(tx *bchain.Tx, desc bchain.AddressDescriptor) {
-	defer func() {
-		if r := recover(); r != nil {
-			glog.Error("onNewTxAddr recovered from panic: ", r)
-		}
-	}()
-	for _, c := range callbacksOnNewTxAddr {
-		c(tx, desc)
-	}
-}
-
 func onNewTx(tx *bchain.MempoolTx) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -675,9 +703,15 @@ func pushSynchronizationHandler(nt bchain.NotificationType) {
 		return
 	}
 	if nt == bchain.NotificationNewBlock {
-		chanSyncIndex <- struct{}{}
+		select {
+		case chanSyncIndex <- struct{}{}:
+		default:
+		}
 	} else if nt == bchain.NotificationNewTx {
-		chanSyncMempool <- struct{}{}
+		select {
+		case chanSyncMempool <- struct{}{}:
+		default:
+		}
 	} else {
 		glog.Error("MQ: unknown notification sent")
 	}

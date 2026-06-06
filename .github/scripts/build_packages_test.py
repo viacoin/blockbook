@@ -21,6 +21,7 @@ class BuildPackagesTest(unittest.TestCase):
         self.workspace = Path(self.tempdir.name)
         self.package_root = self.workspace / "packages"
         self.build_dir = self.workspace / "build"
+        self.package_root.mkdir(parents=True, exist_ok=True)
         self.build_dir.mkdir(parents=True, exist_ok=True)
 
         write_json(
@@ -57,7 +58,7 @@ class BuildPackagesTest(unittest.TestCase):
         build_env: str | None = None,
         rpc_env: str | None = None,
         rpc_url: str | None = None,
-        always_build_backend: bool,
+        backend_mode: str = "auto",
     ) -> tuple[list[str], str]:
         commands: list[list[str]] = []
         outputs = {
@@ -77,7 +78,7 @@ class BuildPackagesTest(unittest.TestCase):
         def fake_run(cmd, check, **kwargs):
             commands.append(list(cmd))
             if cmd[:1] == ["make"]:
-                target = cmd[1]
+                target = next(part for part in cmd[1:] if not part.startswith("PORTABLE="))
                 blockbook_name, backend_name = outputs[target]
                 if blockbook_name:
                     (self.build_dir / blockbook_name).write_text("blockbook", encoding="utf-8")
@@ -100,9 +101,7 @@ class BuildPackagesTest(unittest.TestCase):
             os.chdir(self.workspace)
             with patch.dict(os.environ, env, clear=True), patch("build_packages.subprocess.run", side_effect=fake_run):
                 with contextlib.redirect_stdout(stdout):
-                    argv = [coin]
-                    if always_build_backend:
-                        argv = ["--always-build-backend", *argv]
+                    argv = ["--backend-mode", backend_mode, coin]
                     build_packages.main(argv)
         finally:
             os.chdir(old_cwd)
@@ -114,10 +113,10 @@ class BuildPackagesTest(unittest.TestCase):
             coin="base_archive",
             rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
             rpc_url="http://localhost:18026",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
@@ -128,10 +127,10 @@ class BuildPackagesTest(unittest.TestCase):
             coin="base_archive",
             rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
             rpc_url="http://127.0.0.1:18026",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
@@ -142,10 +141,10 @@ class BuildPackagesTest(unittest.TestCase):
             coin="base_archive",
             rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
             rpc_url="https://rpc.example.invalid/",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-blockbook-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-blockbook-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
@@ -156,10 +155,10 @@ class BuildPackagesTest(unittest.TestCase):
             coin="base_archive",
             rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
             rpc_url="https://rpc.example.invalid/localhost",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-blockbook-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-blockbook-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
@@ -168,10 +167,10 @@ class BuildPackagesTest(unittest.TestCase):
     def test_builds_backend_when_rpc_url_env_is_missing(self) -> None:
         make_cmd, output = self.run_build(
             coin="base_archive",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
@@ -182,10 +181,10 @@ class BuildPackagesTest(unittest.TestCase):
             coin="base_archive",
             rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
             rpc_url="",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
@@ -196,37 +195,51 @@ class BuildPackagesTest(unittest.TestCase):
             coin="base_archive",
             rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
             rpc_url="not-a-loopback-url",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-blockbook-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-blockbook-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
         self.assertFalse((staged_dir / "backend-base_1.0_amd64.deb").exists())
 
-    def test_always_build_backend_overrides_localhost_detection(self) -> None:
+    def test_backend_mode_always_overrides_localhost_detection(self) -> None:
         make_cmd, output = self.run_build(
             coin="base_archive",
             rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
             rpc_url="https://rpc.example.invalid/",
-            always_build_backend=True,
+            backend_mode="always",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "backend-base_1.0_amd64.deb").is_file())
+
+    def test_backend_mode_never_forces_blockbook_only(self) -> None:
+        make_cmd, output = self.run_build(
+            coin="base_archive",
+            rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
+            rpc_url="http://localhost:18026",
+            backend_mode="never",
+        )
+
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-blockbook-base_archive"])
+        self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
+        staged_dir = self.package_root / "feature-test-branch" / "base_archive"
+        self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
+        self.assertFalse((staged_dir / "backend-base_1.0_amd64.deb").exists())
 
     def test_staging_uses_config_name_while_rpc_env_uses_alias(self) -> None:
         make_cmd, output = self.run_build(
             coin="polygon_archive",
             rpc_env="BB_DEV_RPC_URL_HTTP_polygon_archive_bor",
             rpc_url="http://localhost:8545",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-polygon_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-polygon_archive"])
         self.assertEqual(output, "build/blockbook-polygon_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "polygon_archive"
         alias_dir = self.package_root / "feature-test-branch" / "polygon_archive_bor"
@@ -240,10 +253,10 @@ class BuildPackagesTest(unittest.TestCase):
             build_env="prod",
             rpc_env="BB_PROD_RPC_URL_HTTP_base_archive",
             rpc_url="https://rpc.example.invalid/",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-blockbook-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-blockbook-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
@@ -255,10 +268,10 @@ class BuildPackagesTest(unittest.TestCase):
             build_env="prod",
             rpc_env="BB_DEV_RPC_URL_HTTP_base_archive",
             rpc_url="https://rpc.example.invalid/",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-base_archive"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-base_archive"])
         self.assertEqual(output, "build/blockbook-base_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "base_archive"
         self.assertTrue((staged_dir / "blockbook-base_1.0_amd64.deb").is_file())
@@ -267,10 +280,10 @@ class BuildPackagesTest(unittest.TestCase):
     def test_backend_only_coin_builds_backend_target(self) -> None:
         make_cmd, output = self.run_build(
             coin="ethereum_testnet_sepolia_consensus",
-            always_build_backend=False,
+            backend_mode="auto",
         )
 
-        self.assertEqual(make_cmd, ["make", "deb-backend-ethereum_testnet_sepolia_consensus"])
+        self.assertEqual(make_cmd, ["make", "PORTABLE=1", "deb-backend-ethereum_testnet_sepolia_consensus"])
         self.assertEqual(output, "build/backend-eth-sepolia-consensus_1.0_amd64.deb")
         staged_dir = self.package_root / "feature-test-branch" / "ethereum_testnet_sepolia_consensus"
         self.assertTrue((staged_dir / "backend-eth-sepolia-consensus_1.0_amd64.deb").is_file())
@@ -289,6 +302,47 @@ class BuildPackagesTest(unittest.TestCase):
                     build_packages.main(["base_archive"])
         finally:
             os.chdir(old_cwd)
+
+    def test_fails_when_package_root_is_missing(self) -> None:
+        env = {
+            "BRANCH_OR_TAG": "feature/test-branch",
+            "BB_PACKAGE_ROOT": str(self.workspace / "missing-packages"),
+        }
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(self.workspace)
+            with patch.dict(os.environ, env, clear=True), patch("build_packages.subprocess.run"):
+                with self.assertRaises(SystemExit):
+                    build_packages.main(["base_archive"])
+        finally:
+            os.chdir(old_cwd)
+
+    def test_fails_when_package_root_is_not_runner_owned(self) -> None:
+        branch_root = self.package_root / "feature-test-branch"
+        original_stat = build_packages.Path.stat
+
+        def fake_stat(path_obj: Path, *args, **kwargs):
+            result = original_stat(path_obj, *args, **kwargs)
+            if path_obj == self.package_root:
+                return os.stat_result(
+                    (
+                        result.st_mode,
+                        result.st_ino,
+                        result.st_dev,
+                        result.st_nlink,
+                        result.st_uid + 1,
+                        result.st_gid,
+                        result.st_size,
+                        result.st_atime,
+                        result.st_mtime,
+                        result.st_ctime,
+                    )
+                )
+            return result
+
+        with patch("build_packages.Path.stat", autospec=True, side_effect=fake_stat):
+            with self.assertRaises(SystemExit):
+                build_packages.ensure_writable_dir(branch_root)
 
 
 if __name__ == "__main__":

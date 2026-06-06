@@ -19,11 +19,15 @@ on:
           - prod
         required: true
         default: dev
-      always_build_backend:
-        description: "Build backend packages for all selected coins; used only when mode=build"
-        type: boolean
+      backend_mode:
+        description: "Backend package build mode; in never mode, backend-only coins still build backend packages"
+        type: choice
+        options:
+          - auto
+          - always
+          - never
         required: true
-        default: false
+        default: auto
       coins:
         description: "Comma-separated coin aliases from configs/coins; ALL is supported only in build mode"
         required: true
@@ -73,7 +77,7 @@ jobs:
       RESOLVED_BRANCH_OR_TAG: ${{ inputs.branch_or_tag != '' && inputs.branch_or_tag || github.ref_name }}
     outputs:
       runner_matrix: ${{ steps.plan.outputs.runner_matrix }}
-      e2e_regex: ${{ steps.plan.outputs.e2e_regex }}
+      connectivity_regex: ${{ steps.plan.outputs.connectivity_regex }}
       coins_csv: ${{ steps.plan.outputs.coins_csv }}
       test_coins_csv: ${{ steps.plan.outputs.test_coins_csv }}
     steps:
@@ -122,7 +126,7 @@ jobs:
           BRANCH_OR_TAG: ${{ env.RESOLVED_BRANCH_OR_TAG }}
           BB_PACKAGE_ROOT: /opt/blockbook-builds
           BB_BUILD_ENV: ${{ inputs.env }}
-        run: python3 ./.github/scripts/build_packages.py ${{ inputs.always_build_backend && '--always-build-backend' || '' }} ${{ join(matrix.coins, ' ') }}
+        run: python3 ./.github/scripts/build_packages.py --backend-mode ${{ inputs.backend_mode }} ${{ join(matrix.coins, ' ') }}
 
   deploy:
     name: Deploy (${{ matrix.coin }})
@@ -150,7 +154,7 @@ jobs:
         env:
           BRANCH_OR_TAG: ${{ env.RESOLVED_BRANCH_OR_TAG }}
           BB_BUILD_ENV: dev
-        run: ./contrib/scripts/deploy-blockbook-local.sh "${{ matrix.coin }}" --force-confnew
+        run: ./contrib/scripts/deploy-bb-and-backend.sh "${{ matrix.coin }}" --force-confnew
 
   wait-for-sync:
     name: Wait For Sync
@@ -185,7 +189,7 @@ jobs:
     runs-on: [self-hosted, bb-dev-selfhosted]
     env:
       RESOLVED_BRANCH_OR_TAG: ${{ inputs.branch_or_tag != '' && inputs.branch_or_tag || github.ref_name }}
-      E2E_REGEX: ${{ needs.prepare_deploy.outputs.e2e_regex }}
+      CONNECTIVITY_REGEX: ${{ needs.prepare_deploy.outputs.connectivity_regex }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -197,7 +201,34 @@ jobs:
         with:
           vars_json: ${{ toJSON(vars) }}
 
-      - name: Run e2e tests
+      - name: Run Blockbook connectivity tests
         env:
           BB_BUILD_ENV: dev
-        run: make test-e2e ARGS="-v"
+          CONNECTIVITY_REGEX: ${{ env.CONNECTIVITY_REGEX }}
+        run: make test-connectivity ARGS="-v"
+
+      - name: Setup Node.js for OpenAPI tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/openapi/package-lock.json
+
+      - name: Cache OpenAPI test dependencies
+        id: openapi-node-modules-cache
+        uses: actions/cache@v4
+        with:
+          path: tests/openapi/node_modules
+          key: openapi-node-modules-node22-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/openapi/package-lock.json') }}
+          restore-keys: |
+            openapi-node-modules-node22-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install OpenAPI test dependencies
+        if: steps.openapi-node-modules-cache.outputs.cache-hit != 'true'
+        run: npm ci --prefix tests/openapi --prefer-offline --no-audit --no-fund
+
+      - name: Run OpenAPI API e2e tests
+        env:
+          BB_BUILD_ENV: dev
+          OPENAPI_COINS: ${{ needs.prepare_deploy.outputs.test_coins_csv }}
+        run: contrib/tests/run-openapi-tests.sh
