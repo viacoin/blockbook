@@ -43,7 +43,7 @@
     "additional_params": {
       "discover": 1,
       "deprecatedrpc": "estimatefee",
-      "rpcthreads": 16,
+      "rpcthreads": 4,
       "upnp": 0,
       "whitelist": "127.0.0.1"
     }
@@ -64,11 +64,7 @@
       "xpub_magic_segwit_p2sh": 77429938,
       "xpub_magic_segwit_native": 78792518,
       "slip44": 14,
-      "additional_params": {
-        "fiat_rates": "coingecko",
-        "fiat_rates_vs_currencies": "AED,ARS,AUD,BDT,BHD,BMD,BRL,CAD,CHF,CLP,CNY,CZK,DKK,EUR,GBP,HKD,HUF,IDR,ILS,INR,JPY,KRW,KWD,LKR,MMK,MXN,MYR,NGN,NOK,NZD,PHP,PKR,PLN,RUB,SAR,SEK,SGD,THB,TRY,TWD,UAH,USD,VEF,VND,ZAR,BTC,ETH",
-        "fiat_rates_params": "{\"coin\": \"viacoin\", \"periodSeconds\": 900}"
-      }
+      "additional_params": {}
     }
   },
   "meta": {
