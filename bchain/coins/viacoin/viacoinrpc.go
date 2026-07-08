@@ -23,8 +23,6 @@ func NewViacoinRPC(config json.RawMessage, pushHandler func(notificationType bch
 	s := &ViacoinRPC{
 		b.(*btc.BitcoinRPC),
 	}
-	s.RPCMarshaler = btc.JSONMarshalerV1{}
-	s.ChainConfig.SupportsEstimateSmartFee = false
 
 	return s, nil
 }
