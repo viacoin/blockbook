@@ -425,6 +425,13 @@ func (b *EthereumRPC) GetContractInfo(contractDesc bchain.AddressDescriptor) (*b
 	return b.fetchContractInfo(address)
 }
 
+// ErrInvalidErc20Balance is returned when a balanceOf eth_call succeeds but returns data that
+// cannot be parsed as a 32-byte integer (empty "0x" or non-conforming output). It is benign and
+// common for dead/self-destructed or non-ERC20-conforming tokens that linger in holders' contract
+// lists; callers should treat it as "no balance" and must not log it at warning level (it is already
+// tracked via the observeEthCallError "invalid" metric).
+var ErrInvalidErc20Balance = errors.New("Invalid balance")
+
 // EthereumTypeGetErc20ContractBalance returns balance of ERC20 contract for given address
 func (b *EthereumRPC) EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc bchain.AddressDescriptor) (*big.Int, error) {
 	return b.EthereumTypeGetErc20ContractBalanceAtBlock(addrDesc, contractDesc, nil)
@@ -441,7 +448,7 @@ func (b *EthereumRPC) EthereumTypeGetErc20ContractBalanceAtBlock(addrDesc, contr
 	r := parseSimpleNumericProperty(data)
 	if r == nil {
 		b.observeEthCallError("single", "invalid")
-		return nil, errors.New("Invalid balance")
+		return nil, ErrInvalidErc20Balance
 	}
 	return r, nil
 }
@@ -519,7 +526,28 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 	defer cancel()
 	if err := batcher.BatchCallContext(ctx, batch); err != nil {
 		b.observeEthCallError("batch", "rpc")
-		return nil, err
+		// Distinct fallback metric so monitoring can alert on this path even
+		// though we suppress the error to keep callers (e.g. account info)
+		// usable on transient batch-level RPC failures.
+		b.ObserveChainDataFallback("erc20_batch", "rpc")
+		glog.Warningf("erc20 batch eth_call failed: %v, falling back to single calls", err)
+		balances := make([]*big.Int, len(contractDescs))
+		for i, contractDesc := range contractDescs {
+			data, err := b.EthereumTypeRpcCallAtBlock(callData, hexutil.Encode(contractDesc), "", blockNumber)
+			if err != nil {
+				glog.Warningf("erc20 single eth_call fallback failed for %s: %v", hexutil.Encode(contractDesc), err)
+				continue
+			}
+			balances[i] = parseSimpleNumericProperty(data)
+			if balances[i] == nil {
+				b.observeEthCallError("single", "invalid")
+				// Benign and high-volume: a successful eth_call returning empty/non-32-byte data, typical of
+				// dead (self-destructed) or non-ERC20-conforming tokens that linger in holders' contract lists.
+				// Tracked via the "invalid" metric; logged at V(2) to avoid flooding (one line per holder request).
+				glog.V(2).Infof("erc20 single eth_call invalid result for %s: %q", hexutil.Encode(contractDesc), data)
+			}
+		}
+		return balances, nil
 	}
 	balances := make([]*big.Int, len(contractDescs))
 	for i := range batch {
@@ -529,7 +557,7 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 				continue
 			}
 			glog.Warningf("erc20 batch eth_call failed for %s: %v", hexutil.Encode(contractDescs[i]), batch[i].Error)
-			// In case of batch failure, retry missing/failed elements as single calls.
+			// In case of individual element failure in a successful batch, retry it as a single call.
 			data, err := b.EthereumTypeRpcCallAtBlock(callData, hexutil.Encode(contractDescs[i]), "", blockNumber)
 			if err != nil {
 				glog.Warningf("erc20 single eth_call fallback failed for %s: %v", hexutil.Encode(contractDescs[i]), err)
@@ -538,15 +566,18 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 			balances[i] = parseSimpleNumericProperty(data)
 			if balances[i] == nil {
 				b.observeEthCallError("single", "invalid")
-				glog.Warningf("erc20 single eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), data)
+				glog.V(2).Infof("erc20 single eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), data)
 			}
 			continue
 		}
-		// Leave nil on parse failures so callers can retry per contract if needed.
+		// Leave nil on parse failures; retrying as a single call is unlikely to help
+		// as malformed returns usually indicate non-conforming contract implementations.
 		balances[i] = parseSimpleNumericProperty(results[i])
 		if balances[i] == nil {
 			b.observeEthCallError("batch", "invalid")
-			glog.Warningf("erc20 batch eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), results[i])
+			// Benign and high-volume: see the single-call note above. Same event on the batch success path,
+			// dominated by widely-airdropped dead/non-conforming tokens. Tracked via the "invalid" metric.
+			glog.V(2).Infof("erc20 batch eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), results[i])
 		}
 	}
 	return balances, nil
