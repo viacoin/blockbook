@@ -44,6 +44,7 @@
     "client_config_file": "bitcoin_like_client.conf",
     "additional_params": {
       "discover": 1,
+      "deprecatedrpc": "warnings",
       "rpcthreads": 4,
       "whitelist": "127.0.0.1"
     }
